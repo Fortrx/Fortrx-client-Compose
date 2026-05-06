@@ -1,0 +1,151 @@
+CREATE TABLE IF NOT EXISTS metadata (
+    key TEXT PRIMARY KEY NOT NULL,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tokens (
+    name TEXT PRIMARY KEY NOT NULL,
+    value BLOB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS private_keys (
+    user_id INTEGER PRIMARY KEY NOT NULL,
+    payload BLOB NOT NULL,
+    migrated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    contact_id INTEGER PRIMARY KEY NOT NULL,
+    payload BLOB NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS verifications (
+    contact_id INTEGER PRIMARY KEY NOT NULL,
+    safety_number TEXT NOT NULL,
+    verified_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS contacts (
+    user_id INTEGER PRIMARY KEY NOT NULL,
+    username TEXT,
+    is_online INTEGER NOT NULL DEFAULT 0,
+    last_seen_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS conversation_summary (
+    contact_id INTEGER PRIMARY KEY NOT NULL,
+    last_message_id INTEGER,
+    last_message_at TEXT,
+    last_viewed_at TEXT,
+    last_message_preview BLOB,
+    last_direction TEXT,
+    last_status TEXT,
+    unread_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_message_id INTEGER UNIQUE,
+    contact_id INTEGER NOT NULL,
+    direction TEXT NOT NULL,
+    sender_id INTEGER,
+    recipient_id INTEGER,
+    message_number INTEGER,
+    plaintext BLOB,
+    sealed_blob BLOB,
+    created_at TEXT NOT NULL,
+    delivered_at TEXT,
+    expires_at TEXT,
+    status TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_contact_created ON messages(contact_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at, id);
+CREATE INDEX IF NOT EXISTS idx_contacts_username ON contacts(username);
+CREATE INDEX IF NOT EXISTS idx_conversation_summary_last_message_at ON conversation_summary(last_message_at, contact_id);
+
+upsertToken:
+INSERT INTO tokens(name, value) VALUES (?, ?)
+    ON CONFLICT(name) DO UPDATE SET value = excluded.value;
+selectToken:
+SELECT value FROM tokens WHERE name = ?;
+deleteToken:
+DELETE FROM tokens WHERE name = ?;
+
+upsertPrivateKeys:
+INSERT INTO private_keys(user_id, payload, migrated_at) VALUES (?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET payload = excluded.payload, migrated_at = excluded.migrated_at;
+selectPrivateKeysForUser:
+SELECT payload FROM private_keys WHERE user_id = ?;
+selectAnyPrivateKeys:
+SELECT user_id, payload FROM private_keys ORDER BY migrated_at DESC LIMIT 1;
+countPrivateKeys:
+SELECT COUNT(*) FROM private_keys;
+
+upsertSession:
+INSERT INTO sessions(contact_id, payload, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(contact_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at;
+selectSession:
+SELECT payload FROM sessions WHERE contact_id = ?;
+selectAllSessions:
+SELECT contact_id, payload FROM sessions;
+
+upsertVerification:
+INSERT INTO verifications(contact_id, safety_number, verified_at) VALUES (?, ?, ?)
+    ON CONFLICT(contact_id) DO UPDATE SET safety_number = excluded.safety_number, verified_at = excluded.verified_at;
+selectVerification:
+SELECT safety_number FROM verifications WHERE contact_id = ?;
+selectAllVerifications:
+SELECT contact_id, safety_number, verified_at FROM verifications;
+
+upsertContact:
+INSERT INTO contacts(user_id, username, is_online, last_seen_at) VALUES (?, ?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET
+        username = COALESCE(excluded.username, contacts.username),
+        is_online = COALESCE(excluded.is_online, contacts.is_online),
+        last_seen_at = COALESCE(excluded.last_seen_at, contacts.last_seen_at);
+selectAllContacts:
+SELECT user_id, username, is_online, last_seen_at FROM contacts;
+selectContact:
+SELECT user_id, username, is_online, last_seen_at FROM contacts WHERE user_id = ?;
+selectContactByUsername:
+SELECT user_id, username, is_online, last_seen_at FROM contacts WHERE username = ? COLLATE NOCASE LIMIT 1;
+
+existsServerMessage:
+SELECT EXISTS(SELECT 1 FROM messages WHERE server_message_id = ?);
+insertMessage:
+INSERT INTO messages(server_message_id, contact_id, direction, sender_id, recipient_id,
+    message_number, plaintext, sealed_blob, created_at, delivered_at, expires_at, status)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+selectConversation:
+SELECT id, server_message_id, contact_id, direction, sender_id, recipient_id,
+    message_number, plaintext, created_at, status
+FROM messages
+WHERE contact_id = ? AND (:before IS NULL OR created_at < :before)
+ORDER BY created_at DESC, id DESC LIMIT :lim;
+
+countUnreadMessages:
+SELECT COUNT(*) FROM messages WHERE contact_id = ? AND direction = 'incoming' AND (created_at > (SELECT last_viewed_at FROM conversation_summary WHERE contact_id = messages.contact_id) OR (SELECT last_viewed_at FROM conversation_summary WHERE contact_id = messages.contact_id) IS NULL);
+
+upsertConversationSummary:
+INSERT INTO conversation_summary(contact_id, last_message_id, last_message_at, last_viewed_at,
+    last_message_preview, last_direction, last_status, unread_count)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(contact_id) DO UPDATE SET
+        last_message_id = excluded.last_message_id,
+        last_message_at = excluded.last_message_at,
+        last_viewed_at = COALESCE(excluded.last_viewed_at, conversation_summary.last_viewed_at),
+        last_message_preview = excluded.last_message_preview,
+        last_direction = excluded.last_direction,
+        last_status = excluded.last_status,
+        unread_count = excluded.unread_count;
+markConversationViewed:
+UPDATE conversation_summary SET last_viewed_at = ?, unread_count = 0 WHERE contact_id = ?;
+markAllConversationsViewed:
+UPDATE conversation_summary SET last_viewed_at = ?, unread_count = 0;
+selectConversationSummaries:
+SELECT contact_id, last_message_id, last_message_at, last_viewed_at,
+    last_message_preview, last_direction, last_status, unread_count
+FROM conversation_summary
+ORDER BY last_message_at DESC NULLS LAST, contact_id ASC LIMIT ?;
