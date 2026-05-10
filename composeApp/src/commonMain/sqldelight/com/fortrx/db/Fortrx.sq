@@ -90,6 +90,10 @@ selectSession:
 SELECT payload FROM sessions WHERE contact_id = ?;
 selectAllSessions:
 SELECT contact_id, payload FROM sessions;
+deleteSession:
+DELETE FROM sessions WHERE contact_id = ?;
+deleteAllSessions:
+DELETE FROM sessions;
 
 upsertVerification:
 INSERT INTO verifications(contact_id, safety_number, verified_at) VALUES (?, ?, ?)
@@ -109,6 +113,8 @@ selectAllContacts:
 SELECT user_id, username, is_online, last_seen_at FROM contacts;
 selectContact:
 SELECT user_id, username, is_online, last_seen_at FROM contacts WHERE user_id = ?;
+selectContactFlow:
+SELECT user_id, username, is_online, last_seen_at FROM contacts WHERE user_id = ?;
 selectContactByUsername:
 SELECT user_id, username, is_online, last_seen_at FROM contacts WHERE username = ? COLLATE NOCASE LIMIT 1;
 
@@ -118,12 +124,24 @@ insertMessage:
 INSERT INTO messages(server_message_id, contact_id, direction, sender_id, recipient_id,
     message_number, plaintext, sealed_blob, created_at, delivered_at, expires_at, status)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+updateMessageStatus:
+UPDATE messages SET status = ?, server_message_id = COALESCE(?, server_message_id) WHERE id = ?;
+deleteMessageById:
+DELETE FROM messages WHERE id = ?;
+deleteConversationMessages:
+DELETE FROM messages WHERE contact_id = ?;
 selectConversation:
 SELECT id, server_message_id, contact_id, direction, sender_id, recipient_id,
     message_number, plaintext, created_at, status
 FROM messages
 WHERE contact_id = ? AND (:before IS NULL OR created_at < :before)
 ORDER BY created_at DESC, id DESC LIMIT :lim;
+selectMessagesForSearch:
+SELECT m.id, m.contact_id, m.plaintext, m.created_at, c.username
+FROM messages m
+LEFT JOIN contacts c ON c.user_id = m.contact_id
+WHERE m.plaintext IS NOT NULL
+ORDER BY m.created_at DESC, m.id DESC LIMIT :lim;
 
 countUnreadMessages:
 SELECT COUNT(*) FROM messages WHERE contact_id = ? AND direction = 'incoming' AND (created_at > (SELECT last_viewed_at FROM conversation_summary WHERE contact_id = messages.contact_id) OR (SELECT last_viewed_at FROM conversation_summary WHERE contact_id = messages.contact_id) IS NULL);
@@ -144,8 +162,16 @@ markConversationViewed:
 UPDATE conversation_summary SET last_viewed_at = ?, unread_count = 0 WHERE contact_id = ?;
 markAllConversationsViewed:
 UPDATE conversation_summary SET last_viewed_at = ?, unread_count = 0;
+deleteConversationSummary:
+DELETE FROM conversation_summary WHERE contact_id = ?;
 selectConversationSummaries:
 SELECT contact_id, last_message_id, last_message_at, last_viewed_at,
     last_message_preview, last_direction, last_status, unread_count
 FROM conversation_summary
 ORDER BY last_message_at DESC NULLS LAST, contact_id ASC LIMIT ?;
+selectConversationOverviews:
+SELECT cs.contact_id, cs.last_message_at, cs.last_message_preview, cs.last_direction, cs.unread_count,
+    c.username, c.is_online, c.last_seen_at
+FROM conversation_summary cs
+LEFT JOIN contacts c ON c.user_id = cs.contact_id
+ORDER BY cs.last_message_at DESC NULLS LAST, cs.contact_id ASC LIMIT ?;
