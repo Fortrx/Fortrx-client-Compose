@@ -1,6 +1,8 @@
 package com.fortrx.network
 
 import com.fortrx.Settings
+import com.fortrx.storage.SettingsStore
+import com.fortrx.storage.TokenStore
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.HttpClientEngineFactory
 import io.ktor.client.plugins.HttpTimeout
@@ -22,8 +24,11 @@ import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class FortrxApiError(val statusCode: Int, val detail: String, val context: String = "")
     : Exception("[$statusCode] $context: $detail")
@@ -34,6 +39,7 @@ object Api {
     val baseUrl: String get() = Settings.serverUrl
     val json: Json = Json { ignoreUnknownKeys = true; encodeDefaults = false }
     @Volatile private var token: String? = null
+    private val authRefreshMutex = Mutex()
     fun setToken(value: String?) { token = value }
     fun getToken(): String? = token
 
@@ -51,15 +57,15 @@ object Api {
         }
     }
 
-    suspend fun getRequest(endpoint: String): HttpResponse =
+    private suspend fun rawGetRequest(endpoint: String): HttpResponse =
         client.get(Settings.serverUrl + endpoint)
 
-    suspend fun postJson(endpoint: String, body: JsonElement): HttpResponse =
+    private suspend fun rawPostJson(endpoint: String, body: JsonElement): HttpResponse =
         client.post(Settings.serverUrl + endpoint) {
             contentType(ContentType.Application.Json); setBody(body)
         }
 
-    suspend fun postForm(endpoint: String, form: Map<String, String>,
+    private suspend fun rawPostForm(endpoint: String, form: Map<String, String>,
         extraHeaders: Map<String, String> = emptyMap()): HttpResponse =
         client.post(Settings.serverUrl + endpoint) {
             contentType(ContentType.Application.FormUrlEncoded)
@@ -69,8 +75,24 @@ object Api {
             })
         }
 
-    suspend fun deleteRequest(endpoint: String): HttpResponse =
+    private suspend fun rawDeleteRequest(endpoint: String): HttpResponse =
         client.delete(Settings.serverUrl + endpoint)
+
+    suspend fun getRequest(endpoint: String, allowAuthRetry: Boolean = true): HttpResponse =
+        executeWithAuthRetry(endpoint, allowAuthRetry) { rawGetRequest(endpoint) }
+
+    suspend fun postJson(endpoint: String, body: JsonElement, allowAuthRetry: Boolean = true): HttpResponse =
+        executeWithAuthRetry(endpoint, allowAuthRetry) { rawPostJson(endpoint, body) }
+
+    suspend fun postForm(
+        endpoint: String,
+        form: Map<String, String>,
+        extraHeaders: Map<String, String> = emptyMap(),
+        allowAuthRetry: Boolean = true,
+    ): HttpResponse = executeWithAuthRetry(endpoint, allowAuthRetry) { rawPostForm(endpoint, form, extraHeaders) }
+
+    suspend fun deleteRequest(endpoint: String, allowAuthRetry: Boolean = true): HttpResponse =
+        executeWithAuthRetry(endpoint, allowAuthRetry) { rawDeleteRequest(endpoint) }
 
     suspend fun raiseForStatus(response: HttpResponse, context: String = "") {
         if (response.status.isSuccess()) return
@@ -83,6 +105,54 @@ object Api {
 
     suspend fun jsonObject(response: HttpResponse): JsonObject =
         json.parseToJsonElement(response.bodyAsText()).jsonObject
+
+    suspend fun ensureAuthenticatedToken(): String? {
+        return token ?: run {
+            if (refreshAccessTokenIfPossible(null)) token else null
+        }
+    }
+
+    suspend fun refreshAccessTokenIfPossible(previousToken: String? = token): Boolean {
+        val username = Settings.myUsername ?: SettingsStore.loadUsername()
+        val password = Settings.storagePassword ?: SettingsStore.loadStoragePassword()
+        if (username.isNullOrBlank() || password.isNullOrBlank()) return false
+
+        return authRefreshMutex.withLock {
+            if (!token.isNullOrBlank() && token != previousToken) return@withLock true
+
+            val response = runCatching {
+                rawPostForm(
+                    endpoint = "/auth/login",
+                    form = mapOf("username" to username, "password" to password),
+                )
+            }.getOrNull() ?: return@withLock false
+
+            if (!response.status.isSuccess()) return@withLock false
+            val body = runCatching { jsonObject(response) }.getOrNull() ?: return@withLock false
+            val refreshedToken = body["access_token"]?.jsonPrimitive?.contentOrNull ?: return@withLock false
+            setToken(refreshedToken)
+            Settings.myUsername = username
+            try {
+                TokenStore.saveToken(password, refreshedToken)
+            } catch (_: Throwable) {
+                // Keep the in-memory token even if secure persistence fails.
+            }
+            true
+        }
+    }
+
+    private suspend inline fun executeWithAuthRetry(
+        endpoint: String,
+        allowAuthRetry: Boolean,
+        crossinline call: suspend () -> HttpResponse,
+    ): HttpResponse {
+        val originalToken = token
+        var response = call()
+        if (!allowAuthRetry || !response.status.shouldRetryAuth()) return response
+        if (!refreshAccessTokenIfPossible(originalToken)) return response
+        response = call()
+        return response
+    }
 }
 
 fun String.encodeURLParam(): String = buildString {
@@ -96,3 +166,5 @@ fun String.encodeURLParam(): String = buildString {
         }
     }
 }
+
+private fun io.ktor.http.HttpStatusCode.shouldRetryAuth(): Boolean = value == 401 || value == 403

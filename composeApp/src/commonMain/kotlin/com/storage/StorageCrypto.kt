@@ -1,11 +1,19 @@
 package com.fortrx.storage
 
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
+
 class StorageError(message: String, cause: Throwable? = null) : Exception(message, cause)
 
 internal val FORMAT_V2_MAGIC: ByteArray = byteArrayOf(
     'F'.code.toByte(), 'R'.code.toByte(), 'X'.code.toByte(), 'E'.code.toByte(),
     'N'.code.toByte(), 'C'.code.toByte(), '2'.code.toByte(), 0x00,
 )
+internal val FORMAT_V3_MAGIC: ByteArray = byteArrayOf(
+    'F'.code.toByte(), 'R'.code.toByte(), 'X'.code.toByte(), 'E'.code.toByte(),
+    'N'.code.toByte(), 'C'.code.toByte(), '3'.code.toByte(), 0x00,
+)
+
 internal const val LEGACY_SALT_SIZE = 16
 internal const val SALT_SIZE = 32
 internal const val NONCE_SIZE = 12
@@ -18,14 +26,50 @@ expect fun pbkdf2Sha256(password: String, salt: ByteArray, iterations: Int, keyL
 expect fun aesGcmEncrypt(key: ByteArray, nonce: ByteArray, plaintext: ByteArray): ByteArray
 expect fun aesGcmDecrypt(key: ByteArray, nonce: ByteArray, ciphertextAndTag: ByteArray): ByteArray
 
+private object MasterKeyCache {
+    @Volatile var masterKey: String? = null
+    @Volatile var lastPassword: String? = null
+}
+
 private fun deriveKey(password: String, salt: ByteArray): ByteArray =
     pbkdf2Sha256(password, salt, PBKDF2_ITERATIONS, KEY_SIZE_BYTES)
 
+@OptIn(ExperimentalEncodingApi::class)
+private fun getMasterKey(password: String): String {
+    val cached = MasterKeyCache.masterKey
+    if (cached != null && MasterKeyCache.lastPassword == password) return cached
+    
+    println("StorageCrypto: Deriving master key from password")
+    val salt = "fortrx-master-salt-v1".encodeToByteArray()
+    val key = try {
+        deriveKey(password, salt)
+    } catch (e: Exception) {
+        println("StorageCrypto: FAILED to derive master key: ${e.message}")
+        throw e
+    }
+    val encoded = Base64.encode(key)
+    MasterKeyCache.masterKey = encoded
+    MasterKeyCache.lastPassword = password
+    return encoded
+}
+
+internal fun initStorageCrypto(password: String) {
+    getMasterKey(password)
+}
+
 internal fun encrypt(data: ByteArray, password: String): ByteArray {
+    val masterKey = getMasterKey(password)
     val salt = secureRandomBytes(SALT_SIZE)
     val nonce = secureRandomBytes(NONCE_SIZE)
-    val key = deriveKey(password, salt)
-    return FORMAT_V2_MAGIC + salt + nonce + aesGcmEncrypt(key, nonce, data)
+    
+    val itemKey = try {
+        pbkdf2Sha256(masterKey, salt, 1, KEY_SIZE_BYTES)
+    } catch (e: Exception) {
+        println("StorageCrypto: FAILED to derive item key during encryption: ${e.message}")
+        throw e
+    }
+    
+    return FORMAT_V3_MAGIC + salt + nonce + aesGcmEncrypt(itemKey, nonce, data)
 }
 
 private fun startsWith(data: ByteArray, prefix: ByteArray): Boolean {
@@ -35,7 +79,18 @@ private fun startsWith(data: ByteArray, prefix: ByteArray): Boolean {
 }
 
 internal fun decrypt(data: ByteArray, password: String): ByteArray = try {
-    if (startsWith(data, FORMAT_V2_MAGIC)) {
+    if (startsWith(data, FORMAT_V3_MAGIC)) {
+        val masterKey = getMasterKey(password)
+        val min = FORMAT_V3_MAGIC.size + SALT_SIZE + NONCE_SIZE + GCM_TAG_SIZE
+        if (data.size < min) throw StorageError("Wrong password or corrupted file")
+        var off = FORMAT_V3_MAGIC.size
+        val salt = data.copyOfRange(off, off + SALT_SIZE); off += SALT_SIZE
+        val nonce = data.copyOfRange(off, off + NONCE_SIZE); off += NONCE_SIZE
+        val ct = data.copyOfRange(off, data.size)
+        
+        val itemKey = pbkdf2Sha256(masterKey, salt, 1, KEY_SIZE_BYTES)
+        aesGcmDecrypt(itemKey, nonce, ct)
+    } else if (startsWith(data, FORMAT_V2_MAGIC)) {
         val min = FORMAT_V2_MAGIC.size + SALT_SIZE + NONCE_SIZE + GCM_TAG_SIZE
         if (data.size < min) throw StorageError("Wrong password or corrupted file")
         var off = FORMAT_V2_MAGIC.size

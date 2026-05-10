@@ -27,6 +27,7 @@ object KeysApi {
     }
 
     suspend fun fetchKeyBundle(userId: Long): JsonObject {
+        require(userId > 0) { "User id must be positive" }
         val res = Api.getRequest("/keys/$userId")
         Api.raiseForStatus(res, "fetch_key_bundle"); return Api.jsonObject(res)
     }

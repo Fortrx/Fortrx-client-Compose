@@ -26,10 +26,11 @@ object WsClient {
 
     suspend fun listen(userId: Long, token: String? = null,
         onMessage: suspend (JsonObject) -> Unit): Unit = withContext(Dispatchers.Default) {
-        val authToken = token ?: Api.getToken() ?: throw IllegalStateException("No token, login first.")
         var retry = 2_000L
         while (isActive) {
             try {
+                val authToken = token ?: Api.ensureAuthenticatedToken()
+                    ?: throw IllegalStateException("No token, login first.")
                 Api.client.webSocket(
                     urlString = "${wsUrl()}/ws/$userId",
                     request = { header(HttpHeaders.Authorization, "Bearer $authToken") },
@@ -50,7 +51,9 @@ object WsClient {
                     }
                 }
             } catch (e: CancellationException) { throw e }
-            catch (_: Throwable) { /* retry */ }
+            catch (_: Throwable) {
+                Api.refreshAccessTokenIfPossible()
+            }
             delay(retry); retry = (retry * 2).coerceAtMost(10_000L)
         }
     }

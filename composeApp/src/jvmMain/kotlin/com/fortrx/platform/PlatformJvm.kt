@@ -1,8 +1,5 @@
 package com.fortrx.platform
 
-import app.cash.sqldelight.db.SqlDriver
-import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
-import com.fortrx.db.FortrxDb
 import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
 import org.bouncycastle.crypto.params.X25519PublicKeyParameters
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
@@ -15,19 +12,6 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
-
-actual class DriverFactory {
-    actual fun createDriver(passphrase: String): SqlDriver {
-        val home = System.getProperty("user.home")
-        val dir = File(home, ".fortrx").apply { mkdirs() }
-        val dbFile = File(dir, "fortrx.db")
-        val driver = JdbcSqliteDriver("jdbc:sqlite:${dbFile.absolutePath}")
-        if (!dbFile.exists() || dbFile.length() == 0L) {
-            FortrxDb.Schema.create(driver)
-        }
-        return driver
-    }
-}
 
 actual object SecureRandomBytes {
     private val rng = SecureRandom()
@@ -86,3 +70,5 @@ actual object Ed25519 {
         return v.verifySignature(sig)
     }
 }
+
+actual fun getPlatformName(): String = "desktop"

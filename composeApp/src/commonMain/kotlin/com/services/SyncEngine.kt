@@ -1,5 +1,7 @@
 package com.fortrx.services
 
+import com.fortrx.messages.ChatPayloadCodec
+import com.fortrx.platform.NotificationBridge
 import com.fortrx.network.PresenceApi
 import com.fortrx.network.WsClient
 import com.fortrx.storage.Db
@@ -53,9 +55,20 @@ class SyncEngine(
     }
 
     private suspend fun heartbeatLoop() {
+        var delayMs = 20_000L
         while (scope?.isActive == true) {
-            try { PresenceApi.heartbeat(sessionId) } catch (_: Throwable) { /* tolerate */ }
-            delay(20_000)
+            try {
+                val response = PresenceApi.heartbeat(sessionId)
+                val ttlSeconds = response["ttl_seconds"]?.jsonPrimitive?.longOrNull ?: 0L
+                delayMs = if (ttlSeconds > 0) {
+                    (ttlSeconds / 2).coerceIn(10L, 20L) * 1000L
+                } else {
+                    60_000L
+                }
+            } catch (_: Throwable) {
+                delayMs = 20_000L
+            }
+            delay(delayMs)
         }
     }
 
@@ -65,22 +78,34 @@ class SyncEngine(
     }
 
     private suspend fun handleEvent(event: JsonObject) {
-        when (event["type"]?.jsonPrimitive?.contentOrNull) {
-            "message_available" -> MessagingService.fetchAndStoreInbox(storagePassword, userId)
-            "presence_changed" -> {
-                val contactId = event["user_id"]?.jsonPrimitive?.longOrNull ?: return
-                Db.upsertContact(
-                    contactId,
-                    event["username"]?.jsonPrimitive?.contentOrNull,
-                    event["is_online"]?.jsonPrimitive?.booleanOrNull,
-                )
-            }
-            "sync_hint" -> {
-                MessagingService.fetchAndStoreInbox(storagePassword, userId)
-                if (event["refresh_presence"]?.jsonPrimitive?.booleanOrNull == true) {
-                    MessagingService.refreshPresenceCache(storagePassword)
+        try {
+            when (event["type"]?.jsonPrimitive?.contentOrNull) {
+                "message_available" -> {
+                    val synced = MessagingService.fetchAndStoreInbox(storagePassword, userId)
+                    synced.forEach { incoming ->
+                        val senderId = incoming["sender_id"]?.jsonPrimitive?.longOrNull ?: return@forEach
+                        val sender = Db.getContact(senderId)?.username ?: "New message"
+                        val preview = ChatPayloadCodec.previewText(incoming["body"]?.jsonPrimitive?.contentOrNull)
+                        NotificationBridge.showIncomingMessage(sender, preview)
+                    }
+                }
+                "presence_changed" -> {
+                    val contactId = event["user_id"]?.jsonPrimitive?.longOrNull ?: return
+                    Db.upsertContact(
+                        contactId,
+                        event["username"]?.jsonPrimitive?.contentOrNull,
+                        event["is_online"]?.jsonPrimitive?.booleanOrNull,
+                    )
+                }
+                "sync_hint" -> {
+                    MessagingService.fetchAndStoreInbox(storagePassword, userId)
+                    if (event["refresh_presence"]?.jsonPrimitive?.booleanOrNull == true) {
+                        MessagingService.refreshPresenceCache(storagePassword)
+                    }
                 }
             }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 }

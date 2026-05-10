@@ -6,12 +6,16 @@ import com.fortrx.crypto.Ratchet
 import com.fortrx.crypto.RatchetState
 import com.fortrx.crypto.SealedSender
 import com.fortrx.crypto.X3dh
+import com.fortrx.messages.AttachmentPayload
+import com.fortrx.messages.ChatPayloadCodec
 import com.fortrx.network.AuthApi
 import com.fortrx.network.KeysApi
 import com.fortrx.network.MessagesApi
 import com.fortrx.network.PresenceApi
 import com.fortrx.storage.Db
 import com.fortrx.storage.Keystore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -30,7 +34,13 @@ import kotlin.io.encoding.ExperimentalEncodingApi
 @OptIn(ExperimentalEncodingApi::class)
 object MessagingService {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
-    private val keyBundleCache = mutableMapOf<Long, JsonObject>()
+    private val sessionCache = mutableMapOf<Long, RatchetState>()
+    private var cachedKeys: JsonObject? = null
+
+    fun resetCaches() {
+        sessionCache.clear()
+        cachedKeys = null
+    }
 
     private fun JsonObject.stringOrNull(key: String): String? =
         this[key]?.jsonPrimitive?.contentOrNull
@@ -62,6 +72,28 @@ object MessagingService {
     }
 
     /**
+     * Send a text message using settings-cached credentials.
+     */
+    suspend fun sendText(recipientId: Long, plaintext: String, ttlSeconds: Long? = null): JsonObject {
+        val pw = com.fortrx.Settings.storagePassword ?: error("MessagingService: No storage password cached in Settings")
+        val myId = com.fortrx.Settings.myId ?: error("MessagingService: No user id cached in Settings")
+        println("MessagingService: Attempting to send message to $recipientId (myId=$myId)")
+        return try {
+            sendText(pw, myId, recipientId, plaintext, ttlSeconds)
+        } catch (e: Exception) {
+            println("MessagingService: ERROR sending message: ${e.message}")
+            e.printStackTrace()
+            throw e
+        }
+    }
+
+    suspend fun sendAttachment(
+        recipientId: Long,
+        attachment: AttachmentPayload,
+        ttlSeconds: Long? = null,
+    ): JsonObject = sendText(recipientId, ChatPayloadCodec.encodeAttachment(attachment), ttlSeconds)
+
+    /**
      * Send a text message. Auto-initiates a handshake if no session exists.
      */
     suspend fun sendText(
@@ -70,11 +102,12 @@ object MessagingService {
         recipientId: Long,
         plaintext: String,
         ttlSeconds: Long? = null,
-    ): JsonObject {
+    ): JsonObject = withContext(Dispatchers.Default) {
         if (senderId == recipientId) {
             val createdAt = kotlinx.datetime.Clock.System.now().toString()
             val me = runCatching { whoAmI() }.getOrNull()
             Db.upsertContact(senderId, me?.stringOrNull("username"), null)
+            val previewText = ChatPayloadCodec.previewText(plaintext)
             Db.saveOutgoingMessage(
                 password = storagePassword,
                 serverMessageId = null,
@@ -84,9 +117,10 @@ object MessagingService {
                 plaintext = plaintext,
                 createdAt = createdAt,
                 expiresAt = null,
-                status = "local",
+                status = "sent",
+                previewText = previewText,
             )
-            return buildJsonObject {
+            return@withContext buildJsonObject {
                 put("id", JsonNull)
                 put("recipient_id", recipientId)
                 put("created_at", createdAt)
@@ -96,7 +130,7 @@ object MessagingService {
 
         // 1. Ensure session exists
         if (Db.loadSessionBlob(storagePassword, recipientId) == null) {
-            initOutgoingSession(storagePassword, recipientId)
+            initOutgoingSession(storagePassword, senderId, recipientId)
         }
 
         // 2. Load session.
@@ -140,42 +174,63 @@ object MessagingService {
         )
         val sealedB64 = Base64.encode(envelope.blob)
 
-        // 5. POST to the server.
-        val response = MessagesApi.sendMessage(
-            recipientId = recipientId,
-            sealedBlob = sealedB64,
-            messageNumber = newState.sendCount.toLong() - 1L,
-            ttlSeconds = ttlSeconds,
-        )
-
-        // 6. Persist updated session + outgoing message locally.
-        Db.saveSessionBlob(storagePassword, recipientId, json.encodeToString(RatchetState.serializer(), newState))
-        val serverMessageId = response["id"]?.jsonPrimitive?.content?.toLongOrNull()
-            ?: response["message_id"]?.jsonPrimitive?.content?.toLongOrNull()
-        val createdAt = response["created_at"]?.jsonPrimitive?.content ?: kotlinx.datetime.Clock.System.now().toString()
-        val expiresAt = response["expires_at"]?.jsonPrimitive?.content
-        runCatching { upsertContact(recipientId) }
-        Db.saveOutgoingMessage(
+        // 5. Save locally as "sending" first
+        val createdAtLocal = kotlinx.datetime.Clock.System.now().toString()
+        val previewText = ChatPayloadCodec.previewText(plaintext)
+        val localId = Db.saveOutgoingMessage(
             password = storagePassword,
-            serverMessageId = serverMessageId,
+            serverMessageId = null,
             contactId = recipientId,
             recipientId = recipientId,
             messageNumber = newState.sendCount.toLong() - 1L,
             plaintext = plaintext,
-            createdAt = createdAt,
-            expiresAt = expiresAt,
-            status = "sent",
+            createdAt = createdAtLocal,
+            expiresAt = null,
+            status = "sending",
+            previewText = previewText,
         )
-        return response
+
+        // 6. POST to the server.
+        val response = try {
+            MessagesApi.sendMessage(
+                recipientId = recipientId,
+                sealedBlob = sealedB64,
+                messageNumber = newState.sendCount.toLong() - 1L,
+                ttlSeconds = ttlSeconds,
+            )
+        } catch (e: Exception) {
+            Db.updateMessageStatus(localId, "error")
+            throw e
+        }
+
+        // 7. Persist updated session + update message status locally.
+        Db.saveSessionBlob(storagePassword, recipientId, json.encodeToString(RatchetState.serializer(), newState))
+        sessionCache[recipientId] = newState
+        val serverMessageId = response["id"]?.jsonPrimitive?.content?.toLongOrNull()
+            ?: response["message_id"]?.jsonPrimitive?.content?.toLongOrNull()
+        val createdAt = response["created_at"]?.jsonPrimitive?.content ?: createdAtLocal
+        
+        runCatching { upsertContact(recipientId) }
+        Db.updateMessageStatus(localId, "sent", serverMessageId)
+
+        response
     }
 
     /**
      * Pull all pending envelopes from the server, decrypt, persist, and
      * return a normalized list for the UI/CLI: { id, sender_id, body, created_at }.
      */
-    suspend fun fetchAndStoreInbox(storagePassword: String, selfUserId: Long): List<JsonObject> {
-        val raw = MessagesApi.fetchInbox()
+    suspend fun fetchAndStoreInbox(storagePassword: String, selfUserId: Long): List<JsonObject> = withContext(Dispatchers.Default) {
+        val raw = try { MessagesApi.fetchInbox() } catch (e: Exception) { return@withContext emptyList() }
+        if (raw.isEmpty()) return@withContext emptyList()
+        
         val out = mutableListOf<JsonObject>()
+        val keys = cachedKeys ?: Keystore.loadKeys(storagePassword, selfUserId)?.also { cachedKeys = it } 
+            ?: return@withContext emptyList()
+            
+        val ikBPriv = keys.requireBytes("dh_private")
+        val ikBPub = keys.requireBytes("dh_public")
+
         for (env in raw) {
             val sealedB64 = env["sealed_blob"]?.jsonPrimitive?.content ?: continue
             val serverMessageId = env["id"]?.jsonPrimitive?.content?.toLongOrNull()
@@ -186,40 +241,36 @@ object MessagingService {
                 continue
             }
 
-            val keys = Keystore.loadKeys(storagePassword) ?: continue
-            val ikBPriv = keys.requireBytes("dh_private")
-            val ikBPub = keys.requireBytes("dh_public")
-
             val opened = try {
                 SealedSender.open(ikBPriv, ikBPub, Base64.decode(sealedB64))
             } catch (_: Throwable) { continue }
 
-            var sessionJson = Db.loadSessionBlob(storagePassword, opened.senderId)
+            var state = sessionCache[opened.senderId] ?: run {
+                val blob = Db.loadSessionBlob(storagePassword, opened.senderId)
+                blob?.let { json.decodeFromString(RatchetState.serializer(), it) }
+            }
+            
             val headerObj = runCatching { json.parseToJsonElement(opened.headerJson).jsonObject }.getOrNull()
             val x3dh = runCatching { headerObj?.get("x3dh")?.jsonObject }.getOrNull()
 
-            if (sessionJson == null && x3dh != null) {
-                val bootstrapped = runCatching {
+            if (state == null && x3dh != null) {
+                state = runCatching {
                     bootstrapReceiver(storagePassword, opened.senderId, opened.senderIkPublic, x3dh)
                 }.getOrNull()
-                if (bootstrapped != null) {
-                    Db.saveSessionBlob(
-                        storagePassword,
-                        opened.senderId,
-                        json.encodeToString(RatchetState.serializer(), bootstrapped)
-                    )
-                    sessionJson = Db.loadSessionBlob(storagePassword, opened.senderId)
-                }
             }
 
-            if (sessionJson == null) continue
+            if (state == null) continue
 
-            val state = json.decodeFromString(RatchetState.serializer(), sessionJson)
             val ad = com.fortrx.crypto.encodeIdentityAssociatedData(opened.senderIkPublic, ikBPub)
             val decrypted = try {
                 Ratchet.decrypt(state, opened.headerJson.encodeToByteArray(), opened.ciphertext, ad)
             } catch (_: Throwable) {
-                if (x3dh == null) continue
+                if (x3dh == null) {
+                    sessionCache.remove(opened.senderId)
+                    cachedKeys = null
+                    Db.deleteSessionBlob(opened.senderId)
+                    continue
+                }
                 val recoveredState = runCatching {
                     bootstrapReceiver(storagePassword, opened.senderId, opened.senderIkPublic, x3dh)
                 }.getOrNull() ?: continue
@@ -230,8 +281,12 @@ object MessagingService {
 
             val (newState, ptBytes) = decrypted
             val plaintext = ptBytes.decodeToString()
+            val previewText = ChatPayloadCodec.previewText(plaintext)
+            
+            sessionCache[opened.senderId] = newState
             Db.saveSessionBlob(storagePassword, opened.senderId,
                 json.encodeToString(RatchetState.serializer(), newState))
+
             runCatching { upsertContact(opened.senderId) }
             Db.saveIncomingMessage(
                 password = storagePassword,
@@ -244,6 +299,7 @@ object MessagingService {
                 createdAt = createdAt,
                 expiresAt = expiresAt,
                 status = "delivered",
+                previewText = previewText,
             )
             serverMessageId?.let { runCatching { MessagesApi.confirmDelivery(it) } }
 
@@ -254,20 +310,20 @@ object MessagingService {
                 put("created_at", createdAt)
             }
         }
-        return out
+        out
     }
 
     suspend fun whoAmI(): JsonObject = AuthApi.getMe()
 
-    suspend fun getUser(userId: Long): JsonObject {
+    suspend fun getUser(userId: Long): JsonObject = withContext(Dispatchers.Default) {
         val user = AuthApi.getUser(userId)
         Db.upsertContact(userId, user.stringOrNull("username"), null)
-        return user
+        user
     }
 
-    suspend fun getUserByUsername(username: String): JsonObject {
+    suspend fun getUserByUsername(username: String): JsonObject = withContext(Dispatchers.Default) {
         Db.getContactByUsername(username)?.let { cached ->
-            return buildJsonObject {
+            return@withContext buildJsonObject {
                 put("id", cached.userId)
                 cached.username?.let { put("username", it) }
             }
@@ -275,10 +331,10 @@ object MessagingService {
         val user = AuthApi.getUserByUsername(username)
         val userId = user["id"]?.jsonPrimitive?.longOrNull ?: error("Missing user id")
         Db.upsertContact(userId, user.stringOrNull("username"), null)
-        return user
+        user
     }
 
-    suspend fun refreshPresenceCache(storagePassword: String): List<JsonObject> {
+    suspend fun refreshPresenceCache(storagePassword: String): List<JsonObject> = withContext(Dispatchers.Default) {
         val contacts = PresenceApi.fetchPresenceContacts()
         contacts.forEach { contact ->
             val contactId = contact["user_id"]?.jsonPrimitive?.longOrNull ?: return@forEach
@@ -288,10 +344,10 @@ object MessagingService {
                 contact["is_online"]?.jsonPrimitive?.booleanOrNull,
             )
         }
-        return contacts
+        contacts
     }
 
-    suspend fun purgeInbox(storagePassword: String, selfUserId: Long, force: Boolean): Int {
+    suspend fun purgeInbox(storagePassword: String, selfUserId: Long, force: Boolean): Int = withContext(Dispatchers.Default) {
         val synced = fetchAndStoreInbox(storagePassword, selfUserId)
         val remaining = MessagesApi.fetchInbox()
         var purged = synced.size
@@ -304,14 +360,22 @@ object MessagingService {
                 } catch (_: Exception) {}
             }
         }
-        return purged
+        purged
     }
 
-    private suspend fun initOutgoingSession(password: String, recipientId: Long) {
-        val bundle = keyBundleCache[recipientId] ?: KeysApi.fetchKeyBundle(recipientId).also {
-            keyBundleCache[recipientId] = it
+    private suspend fun initOutgoingSession(password: String, senderId: Long, recipientId: Long) {
+        println("MessagingService: Initializing outgoing session for $recipientId")
+        val bundle = try {
+            KeysApi.fetchKeyBundle(recipientId)
+        } catch (e: Exception) {
+            println("MessagingService: FAILED to fetch key bundle for $recipientId: ${e.message}")
+            throw e
         }
-        val keys = Keystore.loadKeys(password) ?: error("Local keys missing")
+        
+        val keys = Keystore.loadKeys(password, senderId) ?: run {
+            println("MessagingService: FAILED to load local keys for $senderId")
+            error("Local keys missing")
+        }
 
         val ikAPriv = keys.requireBytes("dh_private")
         val ikAPub = keys.requireBytes("dh_public")
@@ -349,9 +413,10 @@ object MessagingService {
         state.recipientIkPublic = ikBPub
 
         Db.saveSessionBlob(password, recipientId, json.encodeToString(RatchetState.serializer(), state))
+        sessionCache[recipientId] = state
     }
 
-    private fun bootstrapReceiver(password: String, senderId: Long, senderIk: ByteArray, x3dh: JsonObject): RatchetState {
+    private suspend fun bootstrapReceiver(password: String, senderId: Long, senderIk: ByteArray, x3dh: JsonObject): RatchetState {
         val keys = Keystore.loadKeys(password) ?: error("Local keys missing")
         val ikBPriv = keys.requireBytes("dh_private")
         val spkBPriv = keys.bytesOrNull("signed_prekey_private") ?: keys.requireBytes("signed_pre_private")

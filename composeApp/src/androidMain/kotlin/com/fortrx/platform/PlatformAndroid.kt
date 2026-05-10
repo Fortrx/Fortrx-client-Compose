@@ -1,9 +1,6 @@
 package com.fortrx.platform
 
 import android.content.Context
-import app.cash.sqldelight.db.SqlDriver
-import app.cash.sqldelight.driver.android.AndroidSqliteDriver
-import com.fortrx.db.FortrxDb
 import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
 import org.bouncycastle.crypto.params.X25519PublicKeyParameters
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
@@ -18,11 +15,6 @@ import javax.crypto.spec.PBEKeySpec
 
 object AndroidContextHolder {
     lateinit var appContext: Context
-}
-
-actual class DriverFactory {
-    actual fun createDriver(passphrase: String): SqlDriver =
-        AndroidSqliteDriver(FortrxDb.Schema, AndroidContextHolder.appContext, "fortrx.db")
 }
 
 actual object SecureRandomBytes {
@@ -80,3 +72,5 @@ actual object Ed25519 {
         return v.verifySignature(sig)
     }
 }
+
+actual fun getPlatformName(): String = "android"

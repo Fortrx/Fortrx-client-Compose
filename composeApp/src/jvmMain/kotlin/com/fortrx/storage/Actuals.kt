@@ -2,6 +2,7 @@ package com.fortrx.storage
 
 import app.cash.sqldelight.db.SqlDriver
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import java.io.File
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.SecretKeyFactory
@@ -11,6 +12,10 @@ import javax.crypto.spec.SecretKeySpec
 
 actual fun createSqlDriver(dbFilePath: String, storagePassword: String): SqlDriver {
     return JdbcSqliteDriver("jdbc:sqlite:$dbFilePath")
+}
+
+actual fun deleteDatabaseFile(dbName: String) {
+    File(dbName).delete()
 }
 
 actual fun secureRandomBytes(size: Int): ByteArray = ByteArray(size).also { SecureRandom().nextBytes(it) }

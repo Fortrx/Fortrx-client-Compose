@@ -15,6 +15,10 @@ actual fun createSqlDriver(dbFilePath: String, storagePassword: String): SqlDriv
     return AndroidSqliteDriver(FortrxDb.Schema, AndroidContextHolder.appContext, dbFilePath)
 }
 
+actual fun deleteDatabaseFile(dbName: String) {
+    AndroidContextHolder.appContext.deleteDatabase(dbName)
+}
+
 actual fun secureRandomBytes(size: Int): ByteArray = ByteArray(size).also { SecureRandom().nextBytes(it) }
 
 actual fun pbkdf2Sha256(password: String, salt: ByteArray, iterations: Int, keyLen: Int): ByteArray {

@@ -4,9 +4,13 @@ import com.fortrx.Settings
 import com.fortrx.crypto.KeyOps
 import com.fortrx.network.AuthApi
 import com.fortrx.network.KeysApi
+import com.fortrx.network.Api
 import com.fortrx.storage.Db
 import com.fortrx.storage.Keystore
+import com.fortrx.storage.SettingsStore
 import com.fortrx.storage.TokenStore
+import io.ktor.client.request.delete
+import io.ktor.client.request.header
 import kotlinx.serialization.json.*
 
 object OnboardingService {
@@ -22,26 +26,49 @@ object OnboardingService {
     )
 
     private fun generateLocalKeyMaterial(seed: ByteArray): LocalKeyMaterial {
-        val identity = KeyOps.generateIdentityKeypair(seed)
+        println("OnboardingService: Generating local key material from seed (${seed.size} bytes)")
+        val identity = try {
+            KeyOps.generateIdentityKeypair(seed)
+        } catch (e: Exception) {
+            println("OnboardingService: FAILED to generate identity keypair: ${e.message}")
+            throw e
+        }
+        println("OnboardingService: Identity keypair generated")
+        
         val signedPre = KeyOps.generateSignedPrekey(identity.signingPrivate)
+        println("OnboardingService: Signed prekey generated")
+        
         val oneTimePrekeys = KeyOps.generateOneTimePrekeys(20)
-        val kyberPre = runCatching { KeyOps.generateKyberPrekey(identity.signingPrivate) }.getOrNull()
+        println("OnboardingService: One-time prekeys generated (20)")
+        
+        val kyberPre = runCatching { 
+            KeyOps.generateKyberPrekey(identity.signingPrivate) 
+        }.onFailure {
+            println("OnboardingService: Kyber prekey generation failed (optional): ${it.message}")
+        }.getOrNull()
+
         return LocalKeyMaterial(identity, signedPre, oneTimePrekeys, kyberPre)
     }
 
     suspend fun register(username: String, email: String, password: String): RegistrationResult {
+        MessagingService.resetCaches()
+        val normalizedUsername = username.trim()
         // 1. Register on server
-        val regBody = AuthApi.register(username, email, password)
+        val regBody = AuthApi.register(normalizedUsername, email, password)
         val userId = regBody["id"]?.jsonPrimitive?.longOrNull ?: throw Exception("Registration failed: no user id")
         Settings.myId = userId
+        Settings.myUsername = normalizedUsername
 
         // 2. Login to get token
-        val token = AuthApi.login(username, password)
+        val token = AuthApi.login(normalizedUsername, password)
         
         // 3. Initialize DB
         Settings.storagePassword = password
-        Db.open(password)
+        Db.open(password, userId)
         TokenStore.saveToken(token, password)
+        SettingsStore.saveStoragePassword(password)
+        SettingsStore.saveMyId(userId)
+        SettingsStore.saveUsername(normalizedUsername)
 
         // 4. Generate keys from a fresh backup code
         val backupCode = BackupCode.generate()
@@ -68,24 +95,105 @@ object OnboardingService {
             keyMaterial.oneTimePrekeys,
             keyMaterial.kyberPre,
         )
+        Db.clearSessions()
         Keystore.saveKeys(keysJson, password)
+        SettingsStore.saveBackupCode(backupCode)
         
         return RegistrationResult(token, backupCode)
     }
 
-    suspend fun login(username: String, password: String): String {
-        val token = AuthApi.login(username, password)
+    suspend fun login(username: String, password: String, backupPhrase: String? = null): String {
+        MessagingService.resetCaches()
+        val normalizedUsername = username.trim()
+        println("OnboardingService: Logging in user $normalizedUsername")
+        val token = AuthApi.login(normalizedUsername, password)
         Settings.storagePassword = password
-        Db.open(password)
-        TokenStore.saveToken(token, password)
+        Api.setToken(token) // Temporarily set token to fetch 'me'
         
-        try {
-            val me = AuthApi.getMe()
-            Settings.myId = me["id"]?.jsonPrimitive?.longOrNull
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        val me = AuthApi.getMe()
+        val userId = me["id"]?.jsonPrimitive?.longOrNull ?: 0L
+        val resolvedUsername = me["username"]?.jsonPrimitive?.contentOrNull ?: normalizedUsername
+        Settings.myId = userId
+        Settings.myUsername = resolvedUsername
+        println("OnboardingService: User ID resolved to $userId")
+        
+        Db.open(password, userId)
+        TokenStore.saveToken(token, password)
+        SettingsStore.saveStoragePassword(password)
+        SettingsStore.saveMyId(userId)
+        SettingsStore.saveUsername(resolvedUsername)
 
+        Settings.storagePassword = password
+        Settings.myId = userId
+        Settings.myUsername = resolvedUsername
+
+        if (backupPhrase != null) {
+            println("OnboardingService: Reconstructing keys from backup phrase (FORCE INIT)")
+            val seed = BackupCode.deriveSeed(backupPhrase)
+            val keyMaterial = generateLocalKeyMaterial(seed)
+            val keysJson = buildKeysJson(
+                userId,
+                keyMaterial.identity,
+                keyMaterial.signedPre,
+                keyMaterial.oneTimePrekeys,
+                keyMaterial.kyberPre,
+            )
+            Db.clearSessions()
+            Keystore.saveKeys(keysJson, password)
+            SettingsStore.saveBackupCode(backupPhrase)
+            
+            // Force upload bundle so the server knows we've restored/reset our keys
+            try {
+                KeysApi.uploadKeyBundle(
+                    identityKey = KeyOps.encodePublicKey(keyMaterial.identity.dhPublic),
+                    signingPublic = KeyOps.encodePublicKey(keyMaterial.identity.signingPublic),
+                    signedPrekey = KeyOps.encodePublicKey(keyMaterial.signedPre.publicKey),
+                    signedPrekeySignature = KeyOps.encodePublicKey(keyMaterial.signedPre.signature),
+                    prekeyId = 1,
+                    oneTimePrekeys = keyMaterial.oneTimePrekeys.map { KeyOps.encodePublicKey(it.publicKey) },
+                    kyberPrekeyPublic = keyMaterial.kyberPre?.let { KeyOps.encodePublicKey(it.publicKey) },
+                    kyberPrekeySignature = keyMaterial.kyberPre?.let { KeyOps.encodePublicKey(it.signature) }
+                )
+                println("OnboardingService: Keys saved and bundle uploaded to server")
+            } catch (e: Exception) {
+                println("OnboardingService: WARNING: Could not upload bundle during forced login: ${e.message}")
+            }
+        } else {
+            println("OnboardingService: No backup phrase provided, checking if keys already exist")
+            val existingKeys = Keystore.loadKeys(password, userId)
+            val storedBackupCode = SettingsStore.loadBackupCode()
+            if (existingKeys == null) {
+                println("OnboardingService: Keys missing locally; waiting for explicit restore or fresh setup")
+            } else if (storedBackupCode.isNullOrBlank()) {
+                println("OnboardingService: Backup phrase missing on this device, preserving existing identity and sessions")
+            } else {
+                println("OnboardingService: Keys already exist in keystore")
+            }
+        }
+        
+        return token
+    }
+
+    suspend fun deleteAccount(password: String) {
+        val reauthToken = AuthApi.reauth(password)
+        val response = Api.client.delete("${Settings.serverUrl}/account") {
+            header("X-Reauth", reauthToken)
+        }
+        Api.raiseForStatus(response, "delete_account")
+        com.fortrx.FortrxClient.logout()
+    }
+
+    /**
+     * Performs a forced re-initialization of the client.
+     * Wipes local state, logs in, and re-generates/re-uploads keys.
+     */
+    suspend fun bootstrapForce(username: String, password: String, backupPhrase: String): String {
+        println("OnboardingService: STARTING BOOTSTRAP FORCE")
+        com.fortrx.FortrxClient.logout()
+        Db.deleteDatabase() // Reset local DB
+        
+        val token = login(username, password, backupPhrase)
+        println("OnboardingService: BOOTSTRAP FORCE COMPLETE")
         return token
     }
 
@@ -94,14 +202,21 @@ object OnboardingService {
      * Reconstructs the identity keys from the backup phrase.
      */
     suspend fun restore(username: String, password: String, backupPhrase: String): String {
-        val token = AuthApi.login(username, password)
+        MessagingService.resetCaches()
+        val normalizedUsername = username.trim()
+        val token = AuthApi.login(normalizedUsername, password)
         val me = AuthApi.getMe()
         val userId = me["id"]?.jsonPrimitive?.longOrNull ?: throw Exception("Restore failed: could not fetch user info")
+        val resolvedUsername = me["username"]?.jsonPrimitive?.contentOrNull ?: normalizedUsername
         Settings.myId = userId
+        Settings.myUsername = resolvedUsername
 
         Settings.storagePassword = password
-        Db.open(password)
+        Db.open(password, userId)
         TokenStore.saveToken(token, password)
+        SettingsStore.saveStoragePassword(password)
+        SettingsStore.saveMyId(userId)
+        SettingsStore.saveUsername(resolvedUsername)
 
         // Derive keys from backup phrase
         val seed = BackupCode.deriveSeed(backupPhrase)
@@ -114,7 +229,9 @@ object OnboardingService {
             keyMaterial.oneTimePrekeys,
             keyMaterial.kyberPre,
         )
+        Db.clearSessions()
         Keystore.saveKeys(keysJson, password)
+        SettingsStore.saveBackupCode(backupPhrase)
 
         // Re-upload the complete bundle so a restored client can receive new sessions immediately.
         try {

@@ -22,6 +22,13 @@ android {
         }
     }
     buildTypes {
+        create("dev") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".dev"
+            versionNameSuffix = "-dev"
+            isDebuggable = true
+            matchingFallbacks += listOf("debug")
+        }
         getByName("release") {
             isMinifyEnabled = false
         }

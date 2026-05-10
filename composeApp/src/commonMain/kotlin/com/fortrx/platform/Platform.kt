@@ -1,12 +1,5 @@
 package com.fortrx.platform
 
-import app.cash.sqldelight.db.SqlDriver
-import com.fortrx.db.FortrxDb
-
-expect class DriverFactory {
-    fun createDriver(passphrase: String): SqlDriver
-}
-
 expect object SecureRandomBytes {
     fun nextBytes(n: Int): ByteArray
 }
@@ -31,4 +24,4 @@ expect object Ed25519 {
     fun verify(pub: ByteArray, msg: ByteArray, sig: ByteArray): Boolean
 }
 
-fun newDb(driver: SqlDriver): FortrxDb = FortrxDb(driver)
+expect fun getPlatformName(): String

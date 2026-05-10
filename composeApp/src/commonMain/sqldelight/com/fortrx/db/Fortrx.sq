@@ -120,6 +120,8 @@ SELECT user_id, username, is_online, last_seen_at FROM contacts WHERE username =
 
 existsServerMessage:
 SELECT EXISTS(SELECT 1 FROM messages WHERE server_message_id = ?);
+lastInsertId:
+SELECT last_insert_rowid();
 insertMessage:
 INSERT INTO messages(server_message_id, contact_id, direction, sender_id, recipient_id,
     message_number, plaintext, sealed_blob, created_at, delivered_at, expires_at, status)

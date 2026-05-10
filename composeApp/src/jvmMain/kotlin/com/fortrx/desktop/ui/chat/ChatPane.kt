@@ -10,6 +10,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -18,10 +19,14 @@ import com.fortrx.desktop.ui.components.SafetyNumberDialog
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
 
-data class Bubble(val text: String, val mine: Boolean, val time: String)
+data class Bubble(val id: Long, val text: String, val mine: Boolean, val time: String)
 
 @Composable
-fun ChatPane(conversationId: String?, modifier: Modifier = Modifier) {
+fun ChatPane(
+    conversationId: String?,
+    modifier: Modifier = Modifier,
+    onBack: (() -> Unit)? = null,
+) {
     if (conversationId == null) {
         Box(modifier.background(Color.White), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -31,7 +36,7 @@ fun ChatPane(conversationId: String?, modifier: Modifier = Modifier) {
         }
         return
     }
-    var draft by remember { mutableStateOf("") }
+    var draft by rememberSaveable(conversationId) { mutableStateOf("") }
     var showVerify by remember { mutableStateOf(false) }
     val messages = remember(conversationId) { mutableStateListOf<Bubble>() }
     var contactName by remember(conversationId) { mutableStateOf<String?>(null) }
@@ -44,24 +49,29 @@ fun ChatPane(conversationId: String?, modifier: Modifier = Modifier) {
     LaunchedEffect(conversationId) {
         val cid = conversationId?.toLongOrNull() ?: return@LaunchedEffect
         val pw = com.fortrx.Settings.storagePassword ?: return@LaunchedEffect
-        while (true) {
-            val contact = com.fortrx.storage.Db.getContact(cid)
-            contactName = contact?.username
-            onlineState = contact?.isOnline == true
-            val stored = com.fortrx.storage.Db.listConversation(pw, cid)
+        
+        // Static contact info doesn't need flow for now, but could be added later
+        val contact = com.fortrx.storage.Db.getContact(cid)
+        contactName = contact?.username
+        onlineState = contact?.isOnline == true
+        
+        com.fortrx.storage.Db.listConversationFlow(pw, cid).collect { stored ->
             messages.clear()
             messages.addAll(stored.reversed().map { m ->
-                Bubble(m.plaintext ?: "", m.direction == "outgoing", m.createdAt.takeLast(8).take(5))
+                Bubble(m.id, m.plaintext ?: "", m.direction == "outgoing", m.createdAt.takeLast(8).take(5))
             })
-            kotlinx.coroutines.delay(2000)
         }
     }
 
     Column(modifier.background(Color.White)) {
-        // ... (Header remains the same)
-        // Header
         Surface(color = Color.White, modifier = Modifier.fillMaxWidth()) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (onBack != null) {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Default.ArrowBack, null, tint = Color.Gray)
+                    }
+                    Spacer(Modifier.width(4.dp))
+                }
                 Surface(
                     modifier = Modifier.size(44.dp),
                     shape = CircleShape,
@@ -94,10 +104,12 @@ fun ChatPane(conversationId: String?, modifier: Modifier = Modifier) {
             HorizontalDivider(thickness = 0.5.dp, color = Color(0xFFEEEEEE))
         }
 
-        // Messages
-        LazyColumn(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp)) {
-            item { Spacer(Modifier.height(16.dp)) }
-            items(messages) { m ->
+        LazyColumn(
+            modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp),
+            contentPadding = PaddingValues(vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            items(messages, key = { it.id }) { m ->
                 Row(Modifier.fillMaxWidth().padding(vertical = 4.dp),
                     horizontalArrangement = if (m.mine) Arrangement.End else Arrangement.Start) {
                     Surface(
@@ -124,10 +136,8 @@ fun ChatPane(conversationId: String?, modifier: Modifier = Modifier) {
                     }
                 }
             }
-            item { Spacer(Modifier.height(16.dp)) }
         }
 
-        // Composer
         Surface(color = Color.White, modifier = Modifier.fillMaxWidth()) {
             Row(Modifier.padding(horizontal = 24.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = {}) { Icon(Icons.Default.AttachFile, null, tint = Color.Gray) }
@@ -136,6 +146,8 @@ fun ChatPane(conversationId: String?, modifier: Modifier = Modifier) {
                     onValueChange = { draft = it },
                     modifier = Modifier.weight(1f), 
                     placeholder = { Text("Type here...", color = Color.Gray) },
+                    minLines = 1,
+                    maxLines = 4,
                     shape = RoundedCornerShape(28.dp),
                     colors = TextFieldDefaults.colors(
                         focusedContainerColor = lightGray,

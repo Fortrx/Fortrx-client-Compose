@@ -34,9 +34,10 @@ object BackupCode {
     /** Derives a 32-byte seed from the numeric backup phrase for key restoration. */
     fun deriveSeed(code: String): ByteArray {
         val normalized = normalize(code)
+        val input = if (normalized.length >= 30) normalized else code.padEnd(32, '0').take(32)
         // Use PBKDF2 to turn the numeric string into a high-entropy 32-byte seed.
         // We use a fixed salt for derivation from the backup phrase.
         val salt = "fortrx-backup-salt".encodeToByteArray()
-        return com.fortrx.storage.pbkdf2Sha256(normalized, salt, 100_000, 32)
+        return com.fortrx.storage.pbkdf2Sha256(input, salt, 100_000, 32)
     }
 }

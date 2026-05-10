@@ -7,4 +7,5 @@ object Settings {
     var requestTimeoutSeconds: Long = 30
     var storagePassword: String? = null
     var myId: Long? = null
+    var myUsername: String? = null
 }

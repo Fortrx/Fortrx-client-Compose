@@ -8,5 +8,9 @@ expect object SettingsStore {
     fun loadStoragePassword(): String?
     fun saveMyId(id: Long)
     fun loadMyId(): Long?
+    fun saveUsername(username: String)
+    fun loadUsername(): String?
+    fun saveBackupCode(code: String)
+    fun loadBackupCode(): String?
     fun clear()
 }
