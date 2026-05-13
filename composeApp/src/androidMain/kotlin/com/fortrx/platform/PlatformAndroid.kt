@@ -1,6 +1,8 @@
 package com.fortrx.platform
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
+import androidx.compose.runtime.Composable
 import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
 import org.bouncycastle.crypto.params.X25519PublicKeyParameters
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
@@ -15,6 +17,11 @@ import javax.crypto.spec.PBEKeySpec
 
 object AndroidContextHolder {
     lateinit var appContext: Context
+}
+
+@Composable
+actual fun BackHandler(enabled: Boolean, onBack: () -> Unit) {
+    androidx.activity.compose.BackHandler(enabled, onBack)
 }
 
 actual object SecureRandomBytes {
@@ -73,4 +80,28 @@ actual object Ed25519 {
     }
 }
 
+actual object PlatformClock {
+    actual fun nowIso(): String = if (android.os.Build.VERSION.SDK_INT >= 26) {
+        java.time.Instant.now().toString()
+    } else {
+        // Simple fallback for older Android versions
+        java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        }.format(java.util.Date())
+    }
+}
+
 actual fun getPlatformName(): String = "android"
+
+actual fun initPlatform(context: Any?) {
+    if (context is Context) {
+        AndroidContextHolder.appContext = context
+    }
+}
+
+actual fun isDebugRuntime(): Boolean {
+    val context = runCatching { AndroidContextHolder.appContext }.getOrNull() ?: return false
+    return (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+}
+
+actual fun readRuntimeEnv(name: String): String? = runCatching { System.getenv(name) }.getOrNull()

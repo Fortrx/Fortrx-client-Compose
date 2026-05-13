@@ -19,6 +19,10 @@ actual fun deleteDatabaseFile(dbName: String) {
     AndroidContextHolder.appContext.deleteDatabase(dbName)
 }
 
+actual fun migrateIfNeeded(driver: SqlDriver) {
+    // AndroidSqliteDriver handles creation and migration in its constructor via FortrxDb.Schema.
+}
+
 actual fun secureRandomBytes(size: Int): ByteArray = ByteArray(size).also { SecureRandom().nextBytes(it) }
 
 actual fun pbkdf2Sha256(password: String, salt: ByteArray, iterations: Int, keyLen: Int): ByteArray {

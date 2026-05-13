@@ -7,26 +7,22 @@ import kotlinx.coroutines.test.runTest
 import org.koin.core.context.GlobalContext.get
 import kotlin.test.BeforeTest
 import kotlin.test.Test
+import kotlin.random.Random
 
 open class MultiUserTest : LiveServerSmokeScenario() {
 
-    @BeforeTest
-    fun setup() {
-        // Basic setup, will be overridden in platform-specific tests if needed
-        setupScenario()
-    }
-
     @Test
     fun testHimanshuAndPegasusInteraction() = runTest {
-        // We use password "password" as specified by the user
+        // Use unique suffixes to avoid collisions when running on multiple devices simultaneously
+        val deviceSuffix = Random.nextInt(100, 999)
         runNamedUsersFlow(
-            user1Name = "himanshu",
-            user1Email = "himanshu@example.com",
-            user2Name = "pegasus",
-            user2Email = "pegasus@example.com",
+            user1Name = "himanshu_$deviceSuffix",
+            user1Email = "himanshu_$deviceSuffix@example.com",
+            user2Name = "pegasus_$deviceSuffix",
+            user2Email = "pegasus_$deviceSuffix@example.com",
             onboardingService = get().get<OnboardingService>(),
             messagingService = get().get<MessagingService>(),
-            shouldRegister = false // User said they are already logged in/exist
+            shouldRegister = true // Register them for the test run
         )
     }
 }

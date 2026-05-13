@@ -1,7 +1,9 @@
 package com.fortrx.storage
 
 import app.cash.sqldelight.db.SqlDriver
+import app.cash.sqldelight.db.QueryResult
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import com.fortrx.db.FortrxDb
 import java.io.File
 import java.security.SecureRandom
 import javax.crypto.Cipher
@@ -16,6 +18,28 @@ actual fun createSqlDriver(dbFilePath: String, storagePassword: String): SqlDriv
 
 actual fun deleteDatabaseFile(dbName: String) {
     File(dbName).delete()
+}
+
+actual fun migrateIfNeeded(driver: SqlDriver) {
+    val version = getDbVersion(driver)
+    if (version == 0L) {
+        FortrxDb.Schema.create(driver)
+        setDbVersion(driver, FortrxDb.Schema.version)
+    } else if (version < FortrxDb.Schema.version) {
+        FortrxDb.Schema.migrate(driver, version, FortrxDb.Schema.version)
+        setDbVersion(driver, FortrxDb.Schema.version)
+    }
+}
+
+private fun getDbVersion(driver: SqlDriver): Long {
+    return driver.executeQuery(null, "PRAGMA user_version;", { cursor ->
+        val version = if (cursor.next().value) cursor.getLong(0) ?: 0L else 0L
+        QueryResult.Value(version)
+    }, 0).value
+}
+
+private fun setDbVersion(driver: SqlDriver, version: Long) {
+    driver.execute(null, "PRAGMA user_version = $version;", 0)
 }
 
 actual fun secureRandomBytes(size: Int): ByteArray = ByteArray(size).also { SecureRandom().nextBytes(it) }

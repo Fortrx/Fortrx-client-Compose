@@ -27,7 +27,8 @@ actual object CryptoPrimitives {
 
     actual fun x25519Generate(seed: ByteArray?): KeyPair {
         val priv = if (seed != null) {
-            X25519PrivateKeyParameters(seed, 0)
+            val s = if (seed.size == 32) seed else sha256(seed)
+            X25519PrivateKeyParameters(s, 0)
         } else {
             val gen = X25519KeyPairGenerator()
             gen.init(X25519KeyGenerationParameters(rng))
@@ -44,7 +45,8 @@ actual object CryptoPrimitives {
     }
     actual fun ed25519Generate(seed: ByteArray?): KeyPair {
         val priv = if (seed != null) {
-            Ed25519PrivateKeyParameters(seed, 0)
+            val s = if (seed.size == 32) seed else sha256(seed)
+            Ed25519PrivateKeyParameters(s, 0)
         } else {
             val gen = Ed25519KeyPairGenerator()
             gen.init(Ed25519KeyGenerationParameters(rng))
@@ -64,9 +66,22 @@ actual object CryptoPrimitives {
         signer.update(message, 0, message.size)
         return signer.verifySignature(signature)
     }
-    actual fun kyberGenerate(): KeyPair {
+    actual fun kyberGenerate(seed: ByteArray?): KeyPair {
         val gen = MLKEMKeyPairGenerator()
-        gen.init(MLKEMKeyGenerationParameters(rng, MLKEMParameters.ml_kem_768))
+        if (seed != null) {
+            val fixedRng = object : SecureRandom() {
+                private var pos = 0
+                override fun nextBytes(bytes: ByteArray) {
+                    for (i in bytes.indices) {
+                        bytes[i] = seed[pos % seed.size]
+                        pos++
+                    }
+                }
+            }
+            gen.init(MLKEMKeyGenerationParameters(fixedRng, MLKEMParameters.ml_kem_768))
+        } else {
+            gen.init(MLKEMKeyGenerationParameters(rng, MLKEMParameters.ml_kem_768))
+        }
         val pair = gen.generateKeyPair()
         val priv = pair.private as MLKEMPrivateKeyParameters
         val pub = pair.public as MLKEMPublicKeyParameters

@@ -4,7 +4,6 @@ import com.fortrx.crypto.CryptoPrimitives
 import com.fortrx.crypto.Ratchet
 import com.fortrx.crypto.RatchetState
 import kotlin.test.*
-import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
 @OptIn(ExperimentalEncodingApi::class)
@@ -22,7 +21,7 @@ class AdvancedRatchetTest {
 
     @Test
     fun testChainKeyEvolution() {
-        var (alice, bob) = setupAliceBob()
+        val (alice, bob) = setupAliceBob()
         
         // Initial state: Alice has sending CK, Bob has none until first message
         assertNotNull(alice.sendingChainKey)
@@ -99,7 +98,7 @@ class AdvancedRatchetTest {
             alice = nextAlice
         }
         
-        val (aliceFinal, header, ct) = Ratchet.encrypt(alice, "final".encodeToByteArray(), ad)
+        val (_, header, ct) = Ratchet.encrypt(alice, "final".encodeToByteArray(), ad)
         val (_, pt) = Ratchet.decrypt(bob, header, ct, ad)
         assertContentEquals("final".encodeToByteArray(), pt)
     }

@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS conversation_summary (
     last_message_preview BLOB,
     last_direction TEXT,
     last_status TEXT,
-    unread_count INTEGER NOT NULL DEFAULT 0
+    unread_count INTEGER NOT NULL DEFAULT 0,
+    is_pinned INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -57,7 +58,9 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT NOT NULL,
     delivered_at TEXT,
     expires_at TEXT,
-    status TEXT NOT NULL
+    status TEXT NOT NULL,
+    is_pinned INTEGER NOT NULL DEFAULT 0,
+    forwarded_from_id INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_contact_created ON messages(contact_id, created_at, id);
@@ -100,6 +103,8 @@ INSERT INTO verifications(contact_id, safety_number, verified_at) VALUES (?, ?, 
     ON CONFLICT(contact_id) DO UPDATE SET safety_number = excluded.safety_number, verified_at = excluded.verified_at;
 selectVerification:
 SELECT safety_number FROM verifications WHERE contact_id = ?;
+selectVerificationFlow:
+SELECT safety_number FROM verifications WHERE contact_id = ?;
 selectAllVerifications:
 SELECT contact_id, safety_number, verified_at FROM verifications;
 
@@ -124,20 +129,22 @@ lastInsertId:
 SELECT last_insert_rowid();
 insertMessage:
 INSERT INTO messages(server_message_id, contact_id, direction, sender_id, recipient_id,
-    message_number, plaintext, sealed_blob, created_at, delivered_at, expires_at, status)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    message_number, plaintext, sealed_blob, created_at, delivered_at, expires_at, status, is_pinned, forwarded_from_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 updateMessageStatus:
 UPDATE messages SET status = ?, server_message_id = COALESCE(?, server_message_id) WHERE id = ?;
+updateMessagePinned:
+UPDATE messages SET is_pinned = ? WHERE id = ?;
 deleteMessageById:
 DELETE FROM messages WHERE id = ?;
 deleteConversationMessages:
 DELETE FROM messages WHERE contact_id = ?;
 selectConversation:
 SELECT id, server_message_id, contact_id, direction, sender_id, recipient_id,
-    message_number, plaintext, created_at, status
+    message_number, plaintext, created_at, status, is_pinned, forwarded_from_id
 FROM messages
 WHERE contact_id = ? AND (:before IS NULL OR created_at < :before)
-ORDER BY created_at DESC, id DESC LIMIT :lim;
+ORDER BY is_pinned DESC, created_at DESC, id DESC LIMIT :lim;
 selectMessagesForSearch:
 SELECT m.id, m.contact_id, m.plaintext, m.created_at, c.username
 FROM messages m
@@ -150,8 +157,8 @@ SELECT COUNT(*) FROM messages WHERE contact_id = ? AND direction = 'incoming' AN
 
 upsertConversationSummary:
 INSERT INTO conversation_summary(contact_id, last_message_id, last_message_at, last_viewed_at,
-    last_message_preview, last_direction, last_status, unread_count)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    last_message_preview, last_direction, last_status, unread_count, is_pinned)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(contact_id) DO UPDATE SET
         last_message_id = excluded.last_message_id,
         last_message_at = excluded.last_message_at,
@@ -159,7 +166,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         last_message_preview = excluded.last_message_preview,
         last_direction = excluded.last_direction,
         last_status = excluded.last_status,
-        unread_count = excluded.unread_count;
+        unread_count = excluded.unread_count,
+        is_pinned = COALESCE(excluded.is_pinned, conversation_summary.is_pinned);
+updateConversationPinned:
+UPDATE conversation_summary SET is_pinned = ? WHERE contact_id = ?;
 markConversationViewed:
 UPDATE conversation_summary SET last_viewed_at = ?, unread_count = 0 WHERE contact_id = ?;
 markAllConversationsViewed:
@@ -168,12 +178,12 @@ deleteConversationSummary:
 DELETE FROM conversation_summary WHERE contact_id = ?;
 selectConversationSummaries:
 SELECT contact_id, last_message_id, last_message_at, last_viewed_at,
-    last_message_preview, last_direction, last_status, unread_count
+    last_message_preview, last_direction, last_status, unread_count, is_pinned
 FROM conversation_summary
-ORDER BY last_message_at DESC NULLS LAST, contact_id ASC LIMIT ?;
+ORDER BY is_pinned DESC, last_message_at DESC NULLS LAST, contact_id ASC LIMIT ?;
 selectConversationOverviews:
-SELECT cs.contact_id, cs.last_message_at, cs.last_message_preview, cs.last_direction, cs.unread_count,
+SELECT cs.contact_id, cs.last_message_at, cs.last_message_preview, cs.last_direction, cs.unread_count, cs.is_pinned,
     c.username, c.is_online, c.last_seen_at
 FROM conversation_summary cs
 LEFT JOIN contacts c ON c.user_id = cs.contact_id
-ORDER BY cs.last_message_at DESC NULLS LAST, cs.contact_id ASC LIMIT ?;
+ORDER BY cs.is_pinned DESC, cs.last_message_at DESC NULLS LAST, cs.contact_id ASC LIMIT ?;

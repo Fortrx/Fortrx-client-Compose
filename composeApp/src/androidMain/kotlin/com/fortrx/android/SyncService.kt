@@ -7,8 +7,11 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.fortrx.FortrxClient
 import com.fortrx.storage.SettingsStore
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
 
-class SyncService : Service() {
+class SyncService : Service(), KoinComponent {
+    private val fortrxClient: FortrxClient by inject()
     private val CHANNEL_ID = "fortrx_sync_channel"
     private val NOTIFICATION_ID = 1
 
@@ -22,8 +25,8 @@ class SyncService : Service() {
 
         if (password != null) {
             startForeground(NOTIFICATION_ID, createNotification())
-            if (!FortrxClient.isSyncRunning()) {
-                FortrxClient.startSyncEngine(password)
+            if (!fortrxClient.isSyncRunning()) {
+                fortrxClient.startSyncEngine(password)
             }
         } else {
             stopSelf()

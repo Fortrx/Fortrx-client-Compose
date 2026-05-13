@@ -1,6 +1,8 @@
 package com.fortrx.network
 
 import com.fortrx.Settings
+import com.fortrx.platform.debugLog
+import com.fortrx.platform.isDebugRuntime
 import com.fortrx.storage.SettingsStore
 import com.fortrx.storage.TokenStore
 import io.ktor.client.HttpClient
@@ -18,6 +20,7 @@ import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
+import io.ktor.http.Url
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
@@ -36,7 +39,7 @@ class FortrxApiError(val statusCode: Int, val detail: String, val context: Strin
 expect fun httpEngineFactory(): HttpClientEngineFactory<*>
 
 object Api {
-    val baseUrl: String get() = Settings.serverUrl
+    val baseUrl: String get() = normalizedBaseUrl()
     val json: Json = Json { ignoreUnknownKeys = true; encodeDefaults = false }
     @Volatile private var token: String? = null
     private val authRefreshMutex = Mutex()
@@ -57,26 +60,34 @@ object Api {
         }
     }
 
-    private suspend fun rawGetRequest(endpoint: String): HttpResponse =
-        client.get(Settings.serverUrl + endpoint)
+    private suspend fun rawGetRequest(endpoint: String): HttpResponse {
+        debugNetwork("GET $endpoint")
+        return client.get(endpointUrl(endpoint)).also { debugNetwork("GET $endpoint -> ${it.status.value}") }
+    }
 
-    private suspend fun rawPostJson(endpoint: String, body: JsonElement): HttpResponse =
-        client.post(Settings.serverUrl + endpoint) {
+    private suspend fun rawPostJson(endpoint: String, body: JsonElement): HttpResponse {
+        debugNetwork("POST $endpoint")
+        return client.post(endpointUrl(endpoint)) {
             contentType(ContentType.Application.Json); setBody(body)
-        }
+        }.also { debugNetwork("POST $endpoint -> ${it.status.value}") }
+    }
 
     private suspend fun rawPostForm(endpoint: String, form: Map<String, String>,
-        extraHeaders: Map<String, String> = emptyMap()): HttpResponse =
-        client.post(Settings.serverUrl + endpoint) {
+        extraHeaders: Map<String, String> = emptyMap()): HttpResponse {
+        debugNetwork("POST_FORM $endpoint")
+        return client.post(endpointUrl(endpoint)) {
             contentType(ContentType.Application.FormUrlEncoded)
             extraHeaders.forEach { (k, v) -> header(k, v) }
             setBody(form.entries.joinToString("&") { (k, v) ->
                 k.encodeURLParam() + "=" + v.encodeURLParam()
             })
-        }
+        }.also { debugNetwork("POST_FORM $endpoint -> ${it.status.value}") }
+    }
 
-    private suspend fun rawDeleteRequest(endpoint: String): HttpResponse =
-        client.delete(Settings.serverUrl + endpoint)
+    private suspend fun rawDeleteRequest(endpoint: String): HttpResponse {
+        debugNetwork("DELETE $endpoint")
+        return client.delete(endpointUrl(endpoint)).also { debugNetwork("DELETE $endpoint -> ${it.status.value}") }
+    }
 
     suspend fun getRequest(endpoint: String, allowAuthRetry: Boolean = true): HttpResponse =
         executeWithAuthRetry(endpoint, allowAuthRetry) { rawGetRequest(endpoint) }
@@ -141,17 +152,46 @@ object Api {
         }
     }
 
-    private suspend inline fun executeWithAuthRetry(
+    private suspend fun executeWithAuthRetry(
         endpoint: String,
         allowAuthRetry: Boolean,
-        crossinline call: suspend () -> HttpResponse,
-    ): HttpResponse {
-        val originalToken = token
-        var response = call()
-        if (!allowAuthRetry || !response.status.shouldRetryAuth()) return response
-        if (!refreshAccessTokenIfPossible(originalToken)) return response
-        response = call()
-        return response
+        call: suspend () -> HttpResponse,
+    ): HttpResponse = executeWithAuthRetryFlow(
+        originalToken = token,
+        allowAuthRetry = allowAuthRetry,
+        call = call,
+        shouldRetry = { it.status.shouldRetryAuth() },
+        refresh = ::refreshAccessTokenIfPossible,
+    )
+
+    fun normalizedBaseUrl(rawUrl: String = Settings.serverUrl, allowInsecureLocal: Boolean = isDebugRuntime()): String {
+        val candidate = rawUrl.trim().trimEnd('/')
+        require(candidate.isNotEmpty()) { "Server URL is required" }
+        val parsed = Url(candidate)
+        val scheme = parsed.protocol.name.lowercase()
+        require(scheme == "https" || scheme == "http") { "Server URL must use http or https" }
+        require(parsed.encodedPath.isEmpty() || parsed.encodedPath == "/") { "Server URL must not include a path" }
+        require(parsed.parameters.isEmpty()) { "Server URL must not include query parameters" }
+        require(parsed.fragment.isEmpty()) { "Server URL must not include a fragment" }
+        if (scheme == "http" && !(allowInsecureLocal && isLocalDevelopmentHost(parsed.host))) {
+            throw IllegalArgumentException("Cleartext HTTP is only allowed for local development")
+        }
+        return candidate
+    }
+
+    fun websocketBaseUrl(baseUrl: String = normalizedBaseUrl()): String = when {
+        baseUrl.startsWith("https://") -> baseUrl.replaceFirst("https://", "wss://")
+        baseUrl.startsWith("http://") -> baseUrl.replaceFirst("http://", "ws://")
+        else -> error("Unsupported base URL: $baseUrl")
+    }
+
+    private fun endpointUrl(endpoint: String): String {
+        require(endpoint.startsWith("/")) { "Endpoint must start with '/': $endpoint" }
+        return baseUrl + endpoint
+    }
+
+    private fun debugNetwork(message: String) {
+        if (isDebugRuntime()) debugLog("[fortrx-network] $message")
     }
 }
 
@@ -168,3 +208,22 @@ fun String.encodeURLParam(): String = buildString {
 }
 
 private fun io.ktor.http.HttpStatusCode.shouldRetryAuth(): Boolean = value == 401 || value == 403
+
+internal fun isLocalDevelopmentHost(host: String): Boolean =
+    host.equals("localhost", ignoreCase = true) ||
+        host == "127.0.0.1" ||
+        host == "10.0.2.2"
+
+internal suspend fun <T> executeWithAuthRetryFlow(
+    originalToken: String?,
+    allowAuthRetry: Boolean,
+    call: suspend () -> T,
+    shouldRetry: (T) -> Boolean,
+    refresh: suspend (String?) -> Boolean,
+): T {
+    var response = call()
+    if (!allowAuthRetry || !shouldRetry(response)) return response
+    if (!refresh(originalToken)) return response
+    response = call()
+    return response
+}

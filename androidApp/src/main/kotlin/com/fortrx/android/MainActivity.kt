@@ -8,7 +8,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
-import com.fortrx.android.ui.MobileAppRoot
+import com.fortrx.ui.AppRoot
 import com.fortrx.platform.AndroidContextHolder
 
 class MainActivity : ComponentActivity() {
@@ -17,7 +17,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         AndroidContextHolder.appContext = applicationContext
         requestNotificationPermissionIfNeeded()
-        setContent { MobileAppRoot() }
+        setContent { AppRoot() }
     }
 
     private fun requestNotificationPermissionIfNeeded() {

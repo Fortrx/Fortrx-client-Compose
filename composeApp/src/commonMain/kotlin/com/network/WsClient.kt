@@ -1,6 +1,5 @@
 package com.fortrx.network
 
-import com.fortrx.Settings
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.webSocket
 import io.ktor.client.request.header
@@ -18,12 +17,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 
 object WsClient {
-    private fun wsUrl(): String = when {
-        Settings.serverUrl.startsWith("https://") -> Settings.serverUrl.replaceFirst("https://", "wss://")
-        Settings.serverUrl.startsWith("http://") -> Settings.serverUrl.replaceFirst("http://", "ws://")
-        else -> Settings.serverUrl
-    }
-
     suspend fun listen(userId: Long, token: String? = null,
         onMessage: suspend (JsonObject) -> Unit): Unit = withContext(Dispatchers.Default) {
         var retry = 2_000L
@@ -32,7 +25,7 @@ object WsClient {
                 val authToken = token ?: Api.ensureAuthenticatedToken()
                     ?: throw IllegalStateException("No token, login first.")
                 Api.client.webSocket(
-                    urlString = "${wsUrl()}/ws/$userId",
+                    urlString = "${Api.websocketBaseUrl()}/ws/$userId",
                     request = { header(HttpHeaders.Authorization, "Bearer $authToken") },
                 ) {
                     retry = 2_000L

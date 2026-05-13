@@ -13,6 +13,13 @@ import javax.crypto.spec.SecretKeySpec
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
 
+import androidx.compose.runtime.Composable
+
+@Composable
+actual fun BackHandler(enabled: Boolean, onBack: () -> Unit) {
+    // No-op for desktop as there's no system back button
+}
+
 actual object SecureRandomBytes {
     private val rng = SecureRandom()
     actual fun nextBytes(n: Int): ByteArray = ByteArray(n).also { rng.nextBytes(it) }
@@ -71,4 +78,21 @@ actual object Ed25519 {
     }
 }
 
+actual object PlatformClock {
+    actual fun nowIso(): String = java.time.Instant.now().toString()
+}
+
 actual fun getPlatformName(): String = "desktop"
+
+actual fun initPlatform(context: Any?) {
+    // No-op for desktop
+}
+
+actual fun isDebugRuntime(): Boolean {
+    val property = System.getProperty("fortrx.debug")?.trim()
+    if (property.equals("true", ignoreCase = true)) return true
+    return readRuntimeEnv("FORTRX_DEBUG")?.equals("true", ignoreCase = true) == true
+}
+
+actual fun readRuntimeEnv(name: String): String? =
+    System.getenv(name) ?: System.getProperty(name)

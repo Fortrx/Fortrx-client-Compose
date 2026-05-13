@@ -111,14 +111,16 @@ fun OnboardingScreen(onDone: () -> Unit) {
                                                     com.fortrx.FortrxClient.startSyncEngine(password)
                                                 }
                                                 Mode.Login -> {
-                                                    OnboardingService.login(username, password)
+                                                    val result = OnboardingService.login(username, password)
+                                                    backupCodeToShow = result.backupCode
                                                     com.fortrx.FortrxClient.startSyncEngine(password)
-                                                    onDone()
+                                                    if (backupCodeToShow == null) onDone()
                                                 }
                                                 Mode.Restore -> {
-                                                    OnboardingService.restore(username, password, backupPhrase)
+                                                    val result = OnboardingService.restore(username, password, backupPhrase)
+                                                    backupCodeToShow = result.backupCode
                                                     com.fortrx.FortrxClient.startSyncEngine(password)
-                                                    onDone()
+                                                    if (backupCodeToShow == null) onDone()
                                                 }
                                                 else -> {}
                                             }

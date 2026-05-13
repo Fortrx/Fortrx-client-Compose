@@ -6,6 +6,7 @@ import com.fortrx.Settings
 import com.fortrx.crypto.RatchetState
 import com.fortrx.storage.Db
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 
 class RatchetDashboardScreenModel(val contactId: Long) : ScreenModel {
@@ -27,27 +28,29 @@ class RatchetDashboardScreenModel(val contactId: Long) : ScreenModel {
     }
 
     fun loadData() {
-        _state.update { it.copy(isLoading = true, error = null) }
-        val password = Settings.storagePassword
-        if (password == null) {
-            _state.update { it.copy(isLoading = false, error = "Storage password not set.") }
-            return
-        }
-
-        try {
-            val blob = Db.loadSessionBlob(password, contactId)
-            if (blob == null) {
-                _state.update { it.copy(isLoading = false, sessionBlob = null, ratchetState = null) }
-            } else {
-                val ratchet = try {
-                    json.decodeFromString<RatchetState>(blob)
-                } catch (e: Exception) {
-                    null
-                }
-                _state.update { it.copy(isLoading = false, sessionBlob = blob, ratchetState = ratchet) }
+        screenModelScope.launch {
+            _state.update { it.copy(isLoading = true, error = null) }
+            val password = Settings.storagePassword
+            if (password == null) {
+                _state.update { it.copy(isLoading = false, error = "Storage password not set.") }
+                return@launch
             }
-        } catch (e: Exception) {
-            _state.update { it.copy(isLoading = false, error = "Failed to load session: ${e.message}") }
+
+            try {
+                val blob = Db.loadSessionBlob(password, contactId)
+                if (blob == null) {
+                    _state.update { it.copy(isLoading = false, sessionBlob = null, ratchetState = null) }
+                } else {
+                    val ratchet = try {
+                        json.decodeFromString<RatchetState>(blob)
+                    } catch (e: Exception) {
+                        null
+                    }
+                    _state.update { it.copy(isLoading = false, sessionBlob = blob, ratchetState = ratchet) }
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(isLoading = false, error = "Failed to load session: ${e.message}") }
+            }
         }
     }
 }

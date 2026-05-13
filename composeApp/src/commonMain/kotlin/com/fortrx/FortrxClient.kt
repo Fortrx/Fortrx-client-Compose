@@ -1,6 +1,7 @@
 package com.fortrx
 
 import com.fortrx.network.Api
+import com.fortrx.platform.debugLog
 import com.fortrx.services.OnboardingService
 import com.fortrx.services.MessagingService
 import com.fortrx.services.SyncEngine
@@ -8,7 +9,7 @@ import com.fortrx.platform.getPlatformName
 import com.fortrx.storage.Db
 import com.fortrx.storage.SettingsStore
 import com.fortrx.storage.TokenStore
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.long
 import kotlinx.serialization.json.jsonPrimitive
@@ -17,9 +18,10 @@ import kotlinx.serialization.json.jsonPrimitive
  * The main "abstract" entry point for the Fortrx core logic.
  * Consolidates services and provides a unified interface for the UI.
  */
-object FortrxClient {
-    val onboarding = OnboardingService
-    val messaging = MessagingService
+class FortrxClient(
+    val onboarding: OnboardingService,
+    val messaging: MessagingService
+) {
     private var syncEngine: SyncEngine? = null
 
     fun isSyncRunning(): Boolean = syncEngine != null
@@ -28,10 +30,10 @@ object FortrxClient {
      * Attempts to auto-initialize the client using saved credentials.
      * Returns true if successful (user is logged in and DB is open).
      */
-    suspend fun tryAutoLogin(): Boolean {
-        val password = SettingsStore.loadStoragePassword() ?: return false
+    suspend fun tryAutoLogin(): Boolean = withContext(Dispatchers.Default) {
+        val password = SettingsStore.loadStoragePassword() ?: return@withContext false
         val userId = SettingsStore.loadMyId()
-        return try {
+        return@withContext try {
             Db.open(password, userId)
             if (TokenStore.loadAndSetToken(password)) {
                 Settings.storagePassword = password
@@ -47,8 +49,8 @@ object FortrxClient {
         }
     }
 
-    suspend fun tryAutoLogin(password: String, userId: Long? = null): Boolean {
-        return try {
+    suspend fun tryAutoLogin(password: String, userId: Long? = null): Boolean = withContext(Dispatchers.Default) {
+        return@withContext try {
             Db.open(password, userId)
             if (TokenStore.loadAndSetToken(password)) {
                 Settings.storagePassword = password
@@ -68,18 +70,18 @@ object FortrxClient {
 
     fun startSyncEngine(password: String) {
         if (syncEngine != null) return
-        @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
-        kotlinx.coroutines.GlobalScope.launch {
+        @OptIn(DelicateCoroutinesApi::class)
+        GlobalScope.launch {
             try {
                 val me = com.fortrx.network.AuthApi.getMe()
                 val userId = me["id"]?.jsonPrimitive?.long ?: return@launch
                 Settings.myUsername = me["username"]?.jsonPrimitive?.contentOrNull
                 Settings.myId = userId
                 val sessionId = "${getPlatformName()}-${userId}"
-                syncEngine = SyncEngine(userId, sessionId, password)
+                syncEngine = SyncEngine(userId, sessionId, password, messaging)
                 syncEngine?.start { }
             } catch (e: Exception) {
-                e.printStackTrace()
+                debugLog("Sync engine startup failed.", e)
             }
         }
     }
@@ -96,7 +98,7 @@ object FortrxClient {
 
     fun logout() {
         stopSyncEngine()
-        MessagingService.resetCaches()
+        messaging.resetCaches()
         TokenStore.deleteToken()
         Db.close()
         Api.setToken(null)

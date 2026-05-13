@@ -19,8 +19,21 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.fortrx.desktop.ui.components.NewChatDialog
+import com.fortrx.services.MessagingService
+import kotlinx.coroutines.delay
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
-data class ConversationPreview(val id: String, val title: String, val last: String, val time: String, val unread: Int = 0)
+data class ConversationPreview(
+    val id: String,
+    val title: String,
+    val last: String,
+    val time: String,
+    val unread: Int = 0,
+    val isSearchResult: Boolean = false,
+    val resultLabel: String? = null
+)
 
 @Composable
 fun ConversationList(
@@ -52,9 +65,39 @@ fun ConversationList(
     }
 
     var showNewChat by remember { mutableStateOf(false) }
-    val filtered by remember(query) {
+    var remoteMatch by remember { mutableStateOf<ConversationPreview?>(null) }
+    var searchLoading by remember { mutableStateOf(false) }
+
+    LaunchedEffect(query) {
+        val trimmed = query.trim()
+        if (trimmed.length < 2) {
+            remoteMatch = null
+            return@LaunchedEffect
+        }
+        searchLoading = true
+        delay(300)
+        remoteMatch = runCatching {
+            val user = MessagingService.getUserByUsername(trimmed)
+            val userId = user["id"]?.jsonPrimitive?.longOrNull ?: return@runCatching null
+            if (items.any { it.id == userId.toString() }) return@runCatching null
+            
+            ConversationPreview(
+                id = userId.toString(),
+                title = user["username"]?.jsonPrimitive?.contentOrNull ?: trimmed,
+                last = "Start a new conversation",
+                time = "",
+                unread = 0,
+                isSearchResult = true,
+                resultLabel = "Server"
+            )
+        }.getOrNull()
+        searchLoading = false
+    }
+
+    val filtered by remember(query, remoteMatch) {
         derivedStateOf {
-            items.filter { query.isBlank() || it.title.contains(query, ignoreCase = true) }
+            val local = items.filter { query.isBlank() || it.title.contains(query, ignoreCase = true) }
+            if (remoteMatch != null) listOf(remoteMatch!!) + local else local
         }
     }
 
@@ -81,6 +124,9 @@ fun ConversationList(
             ) {
                 Icon(Icons.Default.Add, null, tint = androidx.compose.ui.graphics.Color.Black)
             }
+        }
+        if (searchLoading) {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(2.dp), color = yellow)
         }
         if (filtered.isEmpty()) {
             Box(
@@ -122,7 +168,18 @@ fun ConversationList(
                     }
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(c.title, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyLarge)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(c.title, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyLarge)
+                            if (c.isSearchResult) {
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    c.resultLabel ?: "Global",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF0A84FF),
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
                         Text(
                             c.last,
                             style = MaterialTheme.typography.bodySmall,

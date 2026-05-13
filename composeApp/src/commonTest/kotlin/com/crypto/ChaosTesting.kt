@@ -3,12 +3,12 @@ package com.crypto
 import com.fortrx.crypto.CryptoPrimitives
 import com.fortrx.crypto.Ratchet
 import com.fortrx.crypto.RatchetState
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
-import kotlin.test.*
+import kotlin.test.Test
+import kotlin.test.assertContentEquals
+import kotlin.test.assertFails
+import kotlin.test.assertFailsWith
 
-class ChaosTesting {
+class RatchetFailureCaseTest {
 
     private val ad = "ad".encodeToByteArray()
     private val sharedSecret = CryptoPrimitives.randomBytes(32)
@@ -71,7 +71,7 @@ class ChaosTesting {
             
             try {
                 Ratchet.decrypt(bob, randomHeader, randomCt, randomAd)
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 // Exceptions are expected, but it should not crash the process or hang
             }
         }
@@ -79,26 +79,20 @@ class ChaosTesting {
 
     @Test
     fun testPartialPersistenceFailureSimulation() {
-        var (alice, bob) = setupAliceBob()
-        
-        // Scenario: Bob decrypts a message, state is updated in memory, but saving to DB fails.
-        // Then Bob receives another message but starts from the OLD state.
-        
+        val (alice, bob) = setupAliceBob()
+
         val pt1 = "Message 1".encodeToByteArray()
         val (alice1, header1, ct1) = Ratchet.encrypt(alice, pt1, ad)
-        
-        val (bob1, decrypted1) = Ratchet.decrypt(bob, header1, ct1, ad)
+
+        val (_, decrypted1) = Ratchet.decrypt(bob, header1, ct1, ad)
         assertContentEquals(pt1, decrypted1)
-        
-        // Bob1 is the "new" state, but we "lose" it and go back to 'bob'
+
         val pt2 = "Message 2".encodeToByteArray()
         val (alice2, header2, ct2) = Ratchet.encrypt(alice1, pt2, ad)
-        
-        // This should still work because message 2 will trigger a skip of message 1 if it sees N=1
+
         val (bob2, decrypted2) = Ratchet.decrypt(bob, header2, ct2, ad)
         assertContentEquals(pt2, decrypted2)
-        
-        // Now if we receive message 1, it should still work from the skipped keys
+
         val (_, decrypted1Again) = Ratchet.decrypt(bob2, header1, ct1, ad)
         assertContentEquals(pt1, decrypted1Again)
     }

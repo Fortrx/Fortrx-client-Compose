@@ -8,18 +8,18 @@ plugins {
 }
 
 kotlin {
-    jvmToolchain(21)
+    jvmToolchain(17)
     jvm {
         mainRun {
             mainClass.set("com.fortrx.desktop.MainKt")
         }
         compilerOptions {
-            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
         }
     }
     androidTarget {
         compilerOptions {
-            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
         }
     }
 
@@ -43,13 +43,21 @@ kotlin {
                 implementation(libs.sqldelight.coroutines)
                 implementation(libs.coroutines.core)
                 implementation(libs.serialization.json)
-                implementation(libs.datetime)
+                api(libs.datetime)
                 implementation(libs.koin.core)
+                implementation(libs.koin.compose.multiplatform)
+                implementation(libs.kermit)
+                implementation(libs.voyager.navigator)
+                implementation(libs.voyager.transitions)
+                implementation(libs.voyager.screenmodel)
+                implementation(libs.voyager.koin)
             }
         }
         val commonTest by getting {
             dependencies {
                 implementation(kotlin("test"))
+                implementation(libs.coroutines.test)
+                implementation(libs.datetime)
             }
         }
         val jvmMain by getting {
@@ -58,6 +66,10 @@ kotlin {
                 implementation(libs.ktor.cio)
                 implementation(libs.sqldelight.jvm)
                 implementation(libs.bouncycastle)
+            }
+        }
+        val jvmTest by getting {
+            dependencies {
             }
         }
         val androidMain by getting {
@@ -69,6 +81,22 @@ kotlin {
                 implementation(libs.sqldelight.android)
                 implementation(libs.bouncycastle)
                 implementation(libs.coroutines.android)
+                implementation(libs.datetime)
+            }
+        }
+        val androidUnitTest by getting {
+            dependencies {
+                implementation("org.robolectric:robolectric:4.14.1")
+                implementation("androidx.test:core:1.6.1")
+            }
+        }
+        val androidInstrumentedTest by getting {
+            dependencies {
+                implementation(kotlin("test"))
+                implementation(libs.coroutines.test)
+                implementation("androidx.test:core:1.6.1")
+                implementation("androidx.test:runner:1.6.1")
+                implementation("androidx.test.ext:junit:1.2.1")
             }
         }
     }
@@ -79,8 +107,13 @@ android {
     compileSdk = 37
     defaultConfig { minSdk = 24 }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_21
-        targetCompatibility = JavaVersion.VERSION_21
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
     }
 }
 
@@ -89,6 +122,20 @@ sqldelight {
         create("FortrxDb") {
             packageName.set("com.fortrx.db")
             dialect("app.cash.sqldelight:sqlite-3-35-dialect:2.3.2")
+        }
+    }
+}
+
+compose.desktop {
+    application {
+        mainClass = "com.fortrx.desktop.MainKt"
+        nativeDistributions {
+            targetFormats(
+                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Exe,
+                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi
+            )
+            packageName = "Fortrx"
+            packageVersion = "1.0.0"
         }
     }
 }
