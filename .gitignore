@@ -17,6 +17,10 @@ captures
 !*.xcworkspace/contents.xcworkspacedata
 **/xcshareddata/WorkspaceSettings.xcsettings
 node_modules/
+.agents/**
+.codex/
+**/*.artifact.md
+.pytest_cache/
 
 # Local Fortrx runtime databases created during desktop/android testing
 composeApp/fortrx*.db
