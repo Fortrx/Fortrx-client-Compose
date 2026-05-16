@@ -9,12 +9,14 @@ import com.fortrx.services.MessagingService
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import org.koin.compose.koinInject
 
 @Composable
 fun NewChatDialog(
     onDismiss: () -> Unit,
     onStart: (Long) -> Unit
 ) {
+    val messagingService = koinInject<MessagingService>()
     var usernameText by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
@@ -45,7 +47,7 @@ fun NewChatDialog(
                     scope.launch {
                         loading = true
                         try {
-                            val user = MessagingService.getUserByUsername(username)
+                            val user = messagingService.getUserByUsername(username)
                             val id = user["id"]?.jsonPrimitive?.long
                                 ?: error("Missing user id")
                             onStart(id)

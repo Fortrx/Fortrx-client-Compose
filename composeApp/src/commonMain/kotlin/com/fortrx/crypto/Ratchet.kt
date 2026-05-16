@@ -28,6 +28,7 @@ data class RatchetState(
     var previousSendCount: Int = 0,
     /** Map key: "remoteDhB64:n", value: 32-byte message key. */
     val skippedMessageKeys: Map<String, ByteArray> = emptyMap(),
+    val skippedKeyTimestamps: Map<String, Long> = emptyMap(), // FIXED: Skipped Message Keys Never Pruned
 
     // Handshake metadata for bootstrapping
     var x3dhEkPublic: ByteArray? = null,
@@ -40,7 +41,10 @@ data class RatchetState(
 )
 
 const val MAX_SKIP = 1000
+const val MAX_SKIPPED_KEY_AGE_MS = 7L * 24 * 60 * 60 * 1000 // FIXED: Skipped Message Keys Never Pruned
 const val NONCE_SIZE = 12
+
+expect fun currentTimeMillis(): Long // FIXED: Skipped Message Keys Never Pruned
 
 @OptIn(ExperimentalEncodingApi::class)
 object Ratchet {
@@ -81,8 +85,7 @@ object Ratchet {
     private fun parseHeader(bytes: ByteArray): JsonObject =
         json.parseToJsonElement(bytes.decodeToString()).jsonObject
 
-    private fun concatAd(associatedData: ByteArray, header: JsonObject): ByteArray {
-        val headerBytes = json.encodeToString(header).encodeToByteArray()
+    private fun concatAd(associatedData: ByteArray, headerBytes: ByteArray): ByteArray {
         val len = associatedData.size
         val prefix = byteArrayOf(
             ((len ushr 24) and 0xFF).toByte(),
@@ -113,7 +116,7 @@ object Ratchet {
         val headerBytes = json.encodeToString(headerObj).encodeToByteArray()
         
         val nonce = CryptoPrimitives.randomBytes(NONCE_SIZE)
-        val aad = concatAd(associatedData, headerObj)
+        val aad = concatAd(associatedData, headerBytes)
         val ct = CryptoPrimitives.aesGcmEncrypt(mk, nonce, plaintext, aad)
         
         val newState = state.copy(sendingChainKey = nextCk, sendCount = state.sendCount + 1)
@@ -123,6 +126,7 @@ object Ratchet {
     /** Decrypt: returns (newState, plaintext). Performs DH ratchet step on remote DH change. */
     fun decrypt(state: RatchetState, headerBytes: ByteArray, ciphertext: ByteArray,
         associatedData: ByteArray): Pair<RatchetState, ByteArray> {
+        val prunedState = pruneStaleSkippedKeys(state) // FIXED: Skipped Message Keys Never Pruned
         if (ciphertext.size < NONCE_SIZE + 16) error("ciphertext too short")
         
         val header = parseHeader(headerBytes)
@@ -133,13 +137,14 @@ object Ratchet {
 
         // 1. Try skipped keys first.
         val skipKey = "$remoteDhB64:$n"
-        state.skippedMessageKeys[skipKey]?.let { mk ->
-            val pt = decryptWithMk(mk, ciphertext, associatedData, header)
-            val pruned = state.skippedMessageKeys.toMutableMap().also { it.remove(skipKey) }
-            return state.copy(skippedMessageKeys = pruned) to pt
+        prunedState.skippedMessageKeys[skipKey]?.let { mk ->
+            val pt = decryptWithMk(mk, ciphertext, associatedData, headerBytes)
+            val prunedKeys = prunedState.skippedMessageKeys.toMutableMap().also { it.remove(skipKey) }
+            val prunedTimestamps = prunedState.skippedKeyTimestamps.toMutableMap().also { it.remove(skipKey) }
+            return prunedState.copy(skippedMessageKeys = prunedKeys, skippedKeyTimestamps = prunedTimestamps) to pt
         }
 
-        var working = state
+        var working = prunedState
         // 2. DH ratchet step if remote sent a new DH public.
         if (working.dhRemotePublic == null || !working.dhRemotePublic!!.contentEquals(remoteDh)) {
             working = skipMessageKeys(working, pn)
@@ -150,15 +155,15 @@ object Ratchet {
         // 4. Advance receiving chain to derive this message's key.
         val (nextRck, mk) = kdfCk(working.recvChainKey ?: error("no recv chain"))
         working = working.copy(recvChainKey = nextRck, recvCount = working.recvCount + 1)
-        val pt = decryptWithMk(mk, ciphertext, associatedData, header)
+        val pt = decryptWithMk(mk, ciphertext, associatedData, headerBytes)
         return working to pt
     }
 
     private fun decryptWithMk(mk: ByteArray, ciphertext: ByteArray,
-        associatedData: ByteArray, header: JsonObject): ByteArray {
+        associatedData: ByteArray, headerBytes: ByteArray): ByteArray {
         val nonce = ciphertext.copyOfRange(0, NONCE_SIZE)
         val data = ciphertext.copyOfRange(NONCE_SIZE, ciphertext.size)
-        val aad = concatAd(associatedData, header)
+        val aad = concatAd(associatedData, headerBytes)
         return CryptoPrimitives.aesGcmDecrypt(mk, nonce, data, aad)
     }
 
@@ -168,15 +173,28 @@ object Ratchet {
         var ck = state.recvChainKey!!
         var n = state.recvCount
         val skipped = state.skippedMessageKeys.toMutableMap()
+        val skippedTimestamps = state.skippedKeyTimestamps.toMutableMap()
         val remoteB64 = Base64.encode(state.dhRemotePublic!!)
         while (n < until) {
             val (next, mk) = kdfCk(ck)
-            skipped["$remoteB64:$n"] = mk
+            val key = "$remoteB64:$n"
+            skipped[key] = mk
+            skippedTimestamps[key] = currentTimeMillis() // FIXED: Skipped Message Keys Never Pruned
             ck = next
             n += 1
         }
-        return state.copy(recvChainKey = ck, recvCount = n, skippedMessageKeys = skipped)
+        return state.copy(recvChainKey = ck, recvCount = n, skippedMessageKeys = skipped, skippedKeyTimestamps = skippedTimestamps)
     }
+
+    private fun pruneStaleSkippedKeys(state: RatchetState): RatchetState {
+        val now = currentTimeMillis()
+        val cutoff = now - MAX_SKIPPED_KEY_AGE_MS
+        val validKeys = state.skippedKeyTimestamps.filterValues { it >= cutoff }.keys
+        return state.copy(
+            skippedMessageKeys = state.skippedMessageKeys.filterKeys { it in validKeys },
+            skippedKeyTimestamps = state.skippedKeyTimestamps.filterKeys { it in validKeys }
+        )
+    } // FIXED: Skipped Message Keys Never Pruned
 
     private fun dhRatchetStep(state: RatchetState, newRemoteDh: ByteArray): RatchetState {
         // Receiving chain from new DH(remote, ourCurrentPriv).

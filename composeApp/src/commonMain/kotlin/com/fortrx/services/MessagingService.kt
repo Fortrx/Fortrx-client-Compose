@@ -8,9 +8,11 @@ import com.fortrx.crypto.SealedSender
 import com.fortrx.crypto.X3dh
 import com.fortrx.services.ErrorService
 import com.fortrx.messages.AttachmentPayload
+import com.fortrx.messages.ChatPayload
 import com.fortrx.messages.ChatPayloadCodec
 import com.fortrx.Settings
 import com.fortrx.network.AuthApi
+import com.fortrx.network.AttachmentApi
 import com.fortrx.network.KeysApi
 import com.fortrx.network.MessagesApi
 import com.fortrx.network.PresenceApi
@@ -18,8 +20,11 @@ import com.fortrx.platform.debugLog
 import com.fortrx.platform.PlatformClock
 import com.fortrx.storage.Db
 import com.fortrx.storage.Keystore
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import com.fortrx.storage.PlatformFileStorage
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.*
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -38,8 +43,60 @@ import kotlin.io.encoding.ExperimentalEncodingApi
 @OptIn(ExperimentalEncodingApi::class)
 class MessagingService(private val errorService: ErrorService) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val sessionCache = mutableMapOf<Long, RatchetState>()
+    private val sendMutexes = mutableMapOf<Long, Mutex>()
+    private val sendMutexMapLock = Mutex()
+    private val activeDownloads = mutableMapOf<Long, Deferred<Unit>>()
+    private val activeDownloadsLock = Mutex()
     private var cachedKeys: JsonObject? = null
+    
+    private val _downloadProgress = MutableStateFlow<Map<Long, TransferProgress>>(emptyMap())
+    val downloadProgress = _downloadProgress.asStateFlow()
+
+    fun reportUploadProgress(messageId: Long, uploaded: Long, total: Long) {
+        _downloadProgress.update {
+            it + (messageId to TransferProgress(
+                phase = TransferPhase.UPLOADING,
+                transferredBytes = uploaded,
+                totalBytes = total,
+                message = "Uploading",
+            ))
+        }
+    }
+
+    private fun updateTransferProgress(
+        messageId: Long,
+        phase: TransferPhase,
+        transferredBytes: Long = 0L,
+        totalBytes: Long? = null,
+        message: String? = null,
+        failureMessage: String? = null,
+    ) {
+        _downloadProgress.update {
+            it + (messageId to TransferProgress(
+                phase = phase,
+                transferredBytes = transferredBytes,
+                totalBytes = totalBytes,
+                message = message,
+                failureMessage = failureMessage,
+            ))
+        }
+    }
+
+    fun clearTransferProgress(messageId: Long) {
+        serviceScope.launch {
+            delay(1200)
+            _downloadProgress.update { current -> current - messageId }
+        }
+    }
+
+    private fun identityVersionKey(contactId: Long) = "identity_version:$contactId"
+    private fun trustWarningKey(contactId: Long) = "trust_warning:$contactId"
+
+    private suspend fun getSendMutex(recipientId: Long): Mutex = sendMutexMapLock.withLock {
+        sendMutexes.getOrPut(recipientId) { Mutex() }
+    }
 
     fun resetCaches() {
         sessionCache.clear()
@@ -101,12 +158,12 @@ class MessagingService(private val errorService: ErrorService) {
     /**
      * Send a text message using settings-cached credentials.
      */
-    suspend fun sendText(recipientId: Long, plaintext: String, ttlSeconds: Long? = null): JsonObject {
+    suspend fun sendText(recipientId: Long, plaintext: String, ttlSeconds: Long? = null, localMessageId: Long? = null, attachmentId: String? = null): JsonObject {
         val pw = com.fortrx.Settings.storagePassword ?: error("MessagingService: No storage password cached in Settings")
         val myId = com.fortrx.Settings.myId ?: error("MessagingService: No user id cached in Settings")
         debugLog("Sending encrypted message.")
         return try {
-            sendText(pw, myId, recipientId, plaintext, ttlSeconds)
+            sendText(pw, myId, recipientId, plaintext, ttlSeconds, localMessageId, attachmentId)
         } catch (e: Exception) {
             debugLog("Message send failed.", e)
             errorService.reportError("Failed to send message: ${e.message}")
@@ -118,7 +175,21 @@ class MessagingService(private val errorService: ErrorService) {
         recipientId: Long,
         attachment: AttachmentPayload,
         ttlSeconds: Long? = null,
-    ): JsonObject = sendText(recipientId, ChatPayloadCodec.encodeAttachment(attachment), ttlSeconds)
+        localMessageId: Long? = null,
+    ): JsonObject = sendText(
+        recipientId = recipientId,
+        plaintext = ChatPayloadCodec.encodeAttachment(attachment),
+        ttlSeconds = ttlSeconds,
+        localMessageId = localMessageId,
+        attachmentId = attachment.attachmentId
+    )
+
+    fun hasIdentityWarning(contactId: Long): Boolean =
+        Db.loadMetadata(trustWarningKey(contactId)) == "changed"
+
+    fun clearIdentityWarning(contactId: Long) {
+        Db.deleteMetadata(trustWarningKey(contactId))
+    }
 
     /**
      * Send a text message. Auto-initiates a handshake if no session exists.
@@ -129,24 +200,32 @@ class MessagingService(private val errorService: ErrorService) {
         recipientId: Long,
         plaintext: String,
         ttlSeconds: Long? = null,
-    ): JsonObject = withContext(Dispatchers.Default) {
-        if (senderId == recipientId) {
+        localMessageId: Long? = null,
+        attachmentId: String? = null,
+    ): JsonObject = getSendMutex(recipientId).withLock {
+        withContext(Dispatchers.Default) {
+            if (senderId == recipientId) {
             val createdAt = PlatformClock.nowIso()
             val me = runCatching { whoAmI() }.getOrNull()
             Db.upsertContact(senderId, me?.stringOrNull("username"), null)
             val previewText = ChatPayloadCodec.previewText(plaintext)
-            Db.saveOutgoingMessage(
-                password = storagePassword,
-                serverMessageId = null,
-                contactId = recipientId,
-                recipientId = recipientId,
-                messageNumber = null,
-                plaintext = plaintext,
-                createdAt = createdAt,
-                expiresAt = null,
-                status = "sent",
-                previewText = previewText,
-            )
+            if (localMessageId != null) {
+                Db.updateMessageStatus(localMessageId, "sent")
+                Db.rewriteMessagePlaintext(storagePassword, localMessageId, plaintext)
+            } else {
+                Db.saveOutgoingMessage(
+                    password = storagePassword,
+                    serverMessageId = null,
+                    contactId = recipientId,
+                    recipientId = recipientId,
+                    messageNumber = null,
+                    plaintext = plaintext,
+                    createdAt = createdAt,
+                    expiresAt = null,
+                    status = "sent",
+                    previewText = previewText,
+                )
+            }
             return@withContext buildJsonObject {
                 put("id", JsonNull)
                 put("recipient_id", recipientId)
@@ -204,18 +283,24 @@ class MessagingService(private val errorService: ErrorService) {
         // 5. Save locally as "sending" first
         val createdAtLocal = PlatformClock.nowIso()
         val previewText = ChatPayloadCodec.previewText(plaintext)
-        val localId = Db.saveOutgoingMessage(
-            password = storagePassword,
-            serverMessageId = null,
-            contactId = recipientId,
-            recipientId = recipientId,
-            messageNumber = newState.sendCount.toLong() - 1L,
-            plaintext = plaintext,
-            createdAt = createdAtLocal,
-            expiresAt = null,
-            status = "sending",
-            previewText = previewText,
-        )
+        val finalLocalId = if (localMessageId != null) {
+            Db.updateMessageStatus(localMessageId, "sending")
+            Db.rewriteMessagePlaintext(storagePassword, localMessageId, plaintext)
+            localMessageId
+        } else {
+            Db.saveOutgoingMessage(
+                password = storagePassword,
+                serverMessageId = null,
+                contactId = recipientId,
+                recipientId = recipientId,
+                messageNumber = newState.sendCount.toLong() - 1L,
+                plaintext = plaintext,
+                createdAt = createdAtLocal,
+                expiresAt = null,
+                status = "sending",
+                previewText = previewText,
+            )
+        }
 
         // 6. POST to the server.
         val response = try {
@@ -224,9 +309,10 @@ class MessagingService(private val errorService: ErrorService) {
                 sealedBlob = sealedB64,
                 messageNumber = newState.sendCount.toLong() - 1L,
                 ttlSeconds = ttlSeconds,
+                attachmentId = attachmentId
             )
         } catch (e: Exception) {
-            Db.updateMessageStatus(localId, "error")
+            Db.updateMessageStatus(finalLocalId, "error")
             throw e
         }
 
@@ -238,10 +324,10 @@ class MessagingService(private val errorService: ErrorService) {
         val createdAt = response["created_at"]?.jsonPrimitive?.content ?: createdAtLocal
         
         runCatching { upsertContact(recipientId) }
-        Db.updateMessageStatus(localId, "sent", serverMessageId)
+        Db.updateMessageStatus(finalLocalId, "sent", serverMessageId)
 
         response
-    }
+    } }
 
     /**
      * Pull all pending envelopes from the server, decrypt, persist, and
@@ -290,7 +376,7 @@ class MessagingService(private val errorService: ErrorService) {
 
             val ad = com.fortrx.crypto.encodeIdentityAssociatedData(opened.senderIkPublic, ikBPub)
             val decrypted = try {
-                Ratchet.decrypt(state, opened.headerJson.encodeToByteArray(), opened.ciphertext, ad)
+                Ratchet.decrypt(state, opened.headerBytes, opened.ciphertext, ad)
             } catch (_: Throwable) {
                 if (x3dh == null) {
                     sessionCache.remove(opened.senderId)
@@ -302,7 +388,7 @@ class MessagingService(private val errorService: ErrorService) {
                     bootstrapReceiver(storagePassword, opened.senderId, opened.senderIkPublic, x3dh)
                 }.getOrNull() ?: continue
                 runCatching {
-                    Ratchet.decrypt(recoveredState, opened.headerJson.encodeToByteArray(), opened.ciphertext, ad)
+                    Ratchet.decrypt(recoveredState, opened.headerBytes, opened.ciphertext, ad)
                 }.getOrNull() ?: continue
             }
 
@@ -310,12 +396,14 @@ class MessagingService(private val errorService: ErrorService) {
             val plaintext = ptBytes.decodeToString()
             val previewText = ChatPayloadCodec.previewText(plaintext)
             
-            sessionCache[opened.senderId] = newState
-            Db.saveSessionBlob(storagePassword, opened.senderId,
-                json.encodeToString(RatchetState.serializer(), newState))
+            getSendMutex(opened.senderId).withLock {
+                sessionCache[opened.senderId] = newState
+                Db.saveSessionBlob(storagePassword, opened.senderId,
+                    json.encodeToString(RatchetState.serializer(), newState))
+            }
 
             runCatching { upsertContact(opened.senderId) }
-            Db.saveIncomingMessage(
+            val localId = Db.saveIncomingMessage(
                 password = storagePassword,
                 serverMessageId = serverMessageId,
                 contactId = opened.senderId,
@@ -328,6 +416,18 @@ class MessagingService(private val errorService: ErrorService) {
                 status = "delivered",
                 previewText = previewText,
             )
+            
+            // Auto-download media
+            val payload = ChatPayloadCodec.decode(plaintext)
+            if (payload is com.fortrx.messages.ChatPayload.Attachment && localId != null) {
+                val attachment = payload.attachment
+                if (attachment.mimeType.startsWith("image/") || attachment.mimeType.startsWith("video/")) {
+                    serviceScope.launch {
+                        runCatching { downloadAttachment(localId) }
+                    }
+                }
+            }
+
             serverMessageId?.let { runCatching { MessagesApi.confirmDelivery(it) } }
 
             out += buildJsonObject {
@@ -392,10 +492,13 @@ class MessagingService(private val errorService: ErrorService) {
 
     suspend fun deleteMessage(contactId: Long, messageId: Long) {
         val password = Settings.storagePassword ?: return
+        Db.getMessage(password, messageId)?.let { cleanupAttachmentAssets(it.plaintext) }
         Db.deleteMessage(password, messageId, contactId)
     }
 
     suspend fun deleteChat(contactId: Long) {
+        val password = Settings.storagePassword ?: return
+        Db.listConversationAll(password, contactId).forEach { cleanupAttachmentAssets(it.plaintext) }
         Db.deleteConversation(contactId)
     }
 
@@ -414,6 +517,119 @@ class MessagingService(private val errorService: ErrorService) {
         sendText(targetContactId, text)
     }
 
+    suspend fun downloadAttachment(messageId: Long) {
+        val existing = activeDownloadsLock.withLock { activeDownloads[messageId] }
+        if (existing != null) {
+            existing.await()
+            return
+        }
+
+        val deferred = activeDownloadsLock.withLock {
+            activeDownloads[messageId] ?: serviceScope.async {
+                performAttachmentDownload(messageId)
+            }.also { activeDownloads[messageId] = it }
+        }
+
+        try {
+            deferred.await()
+        } finally {
+            activeDownloadsLock.withLock {
+                if (activeDownloads[messageId] == deferred) {
+                    activeDownloads.remove(messageId)
+                }
+            }
+        }
+    }
+
+    private suspend fun performAttachmentDownload(messageId: Long) {
+        val password = Settings.storagePassword ?: return
+        val message = Db.getMessage(password, messageId) ?: return
+        val payload = ChatPayloadCodec.decode(message.plaintext)
+        val attachment = (payload as? ChatPayload.Attachment)?.attachment ?: return
+        if (attachment.attachmentId.isBlank()) return
+
+        updateTransferProgress(
+            messageId = messageId,
+            phase = TransferPhase.DOWNLOADING,
+            transferredBytes = 0L,
+            totalBytes = attachment.sizeBytes,
+            message = "Downloading",
+        )
+        Db.updateMessageStatus(messageId, "downloading")
+
+        try {
+            val downloaded = com.fortrx.attachments.AttachmentPlatform.downloadAttachment(
+                attachmentId = attachment.attachmentId,
+                fileName = attachment.fileName,
+                mimeType = attachment.mimeType,
+                mediaKeyBase64 = attachment.mediaKeyBase64,
+                nonceBase64 = attachment.nonceBase64,
+                expectedSha256 = attachment.sha256,
+                expectedSizeBytes = attachment.sizeBytes,
+                onProgress = { phase, transferred, total ->
+                    updateTransferProgress(
+                        messageId = messageId,
+                        phase = phase,
+                        transferredBytes = transferred,
+                        totalBytes = total ?: attachment.sizeBytes,
+                        message = phase.name.lowercase().replaceFirstChar(Char::titlecase),
+                    )
+                },
+            )
+            updateTransferProgress(
+                messageId = messageId,
+                phase = TransferPhase.SAVING,
+                transferredBytes = attachment.sizeBytes,
+                totalBytes = attachment.sizeBytes,
+                message = "Saving",
+            )
+            val updatedPayload = attachment.copy(
+                localFileName = downloaded.localFileName,
+                downloadedAt = PlatformClock.nowIso(),
+            )
+            Db.rewriteMessagePlaintext(password, messageId, ChatPayloadCodec.encodeAttachment(updatedPayload))
+
+            val isMedia = attachment.mimeType.startsWith("image/") || attachment.mimeType.startsWith("video/")
+            val isDocument = attachment.mimeType.contains("pdf") ||
+                attachment.mimeType.contains("document") ||
+                attachment.mimeType.contains("sheet") ||
+                attachment.mimeType.contains("presentation") ||
+                attachment.mimeType.contains("text/")
+            val isAudio = attachment.mimeType.startsWith("audio/")
+            if (isMedia || isDocument || isAudio || attachment.mimeType == "application/octet-stream") {
+                runCatching {
+                    com.fortrx.attachments.AttachmentPlatform.saveAttachmentToDevice(
+                        downloaded.localFileName,
+                        attachment.fileName,
+                        attachment.mimeType
+                    )
+                }
+            }
+            runCatching { AttachmentApi.ack(attachment.attachmentId) }
+            com.fortrx.attachments.AttachmentPlatform.deleteRemote(attachment.attachmentId)
+            updateTransferProgress(
+                messageId = messageId,
+                phase = TransferPhase.COMPLETED,
+                transferredBytes = attachment.sizeBytes,
+                totalBytes = attachment.sizeBytes,
+                message = "Completed",
+            )
+            Db.updateMessageStatus(messageId, "delivered")
+        } catch (e: Exception) {
+            updateTransferProgress(
+                messageId = messageId,
+                phase = TransferPhase.FAILED,
+                totalBytes = attachment.sizeBytes,
+                message = "Failed",
+                failureMessage = e.message,
+            )
+            Db.updateMessageStatus(messageId, "error")
+            throw e
+        } finally {
+            clearTransferProgress(messageId)
+        }
+    }
+
     private suspend fun initOutgoingSession(password: String, senderId: Long, recipientId: Long) {
         debugLog("Initializing outgoing session.")
         val bundle = try {
@@ -421,6 +637,18 @@ class MessagingService(private val errorService: ErrorService) {
         } catch (e: Exception) {
             debugLog("Fetching recipient key bundle failed.", e)
             throw e
+        }
+
+        val remoteIdentityVersion = bundle["identity_version"]?.jsonPrimitive?.longOrNull
+        val previousIdentityVersion = Db.loadMetadata(identityVersionKey(recipientId))?.toLongOrNull()
+        if (remoteIdentityVersion != null) {
+            Db.saveMetadata(identityVersionKey(recipientId), remoteIdentityVersion.toString())
+            if (previousIdentityVersion != null && previousIdentityVersion != remoteIdentityVersion) {
+                Db.deleteVerification(recipientId)
+                Db.saveMetadata(trustWarningKey(recipientId), "changed")
+                Db.deleteSessionBlob(recipientId)
+                sessionCache.remove(recipientId)
+            }
         }
         
         val keys = Keystore.loadKeys(password, senderId) ?: run {
@@ -465,6 +693,14 @@ class MessagingService(private val errorService: ErrorService) {
 
         Db.saveSessionBlob(password, recipientId, json.encodeToString(RatchetState.serializer(), state))
         sessionCache[recipientId] = state
+    }
+
+    private suspend fun cleanupAttachmentAssets(plaintext: String?) {
+        val attachment = (ChatPayloadCodec.decode(plaintext) as? ChatPayload.Attachment)?.attachment ?: return
+        attachment.localFileName?.let { PlatformFileStorage.deleteFile(it) }
+        if (attachment.attachmentId.isNotBlank()) {
+            runCatching { com.fortrx.attachments.AttachmentPlatform.deleteRemote(attachment.attachmentId) }
+        }
     }
 
     private suspend fun bootstrapReceiver(password: String, senderId: Long, senderIk: ByteArray, x3dh: JsonObject): RatchetState {

@@ -4,6 +4,8 @@ import app.cash.sqldelight.db.SqlDriver
 import app.cash.sqldelight.db.QueryResult
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import com.fortrx.db.FortrxDb
+import java.util.prefs.Preferences
+import java.util.Base64
 import java.io.File
 import java.security.SecureRandom
 import javax.crypto.Cipher
@@ -43,6 +45,17 @@ private fun setDbVersion(driver: SqlDriver, version: Long) {
 }
 
 actual fun secureRandomBytes(size: Int): ByteArray = ByteArray(size).also { SecureRandom().nextBytes(it) }
+
+actual fun loadOrCreateMasterSalt(): ByteArray {
+    val prefs = Preferences.userNodeForPackage(StorageError::class.java)
+    val saltB64 = prefs.get("master_key_salt", null)
+    if (saltB64 != null) {
+        return Base64.getDecoder().decode(saltB64)
+    }
+    val newSalt = secureRandomBytes(32)
+    prefs.put("master_key_salt", Base64.getEncoder().encodeToString(newSalt))
+    return newSalt
+} // FIXED: Static PBKDF2 Salt for Master Key
 
 actual fun pbkdf2Sha256(password: String, salt: ByteArray, iterations: Int, keyLen: Int): ByteArray {
     val spec = PBEKeySpec(password.toCharArray(), salt, iterations, keyLen * 8)

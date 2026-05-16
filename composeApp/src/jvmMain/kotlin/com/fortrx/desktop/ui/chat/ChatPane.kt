@@ -24,6 +24,7 @@ import com.fortrx.desktop.ui.components.SafetyNumberDialog
 import com.fortrx.messages.AttachmentPayload
 import com.fortrx.messages.ChatPayloadCodec
 import com.fortrx.services.MessagingService
+import com.fortrx.services.TimeFormats
 import fortrxclient.composeapp.generated.resources.Res
 import fortrxclient.composeapp.generated.resources.bg_chats_doodle
 import org.jetbrains.compose.resources.painterResource as composePainterResource
@@ -32,7 +33,6 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
 import org.koin.compose.koinInject
 import java.io.File
-import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
 data class Bubble(val id: Long, val text: String, val mine: Boolean, val time: String)
@@ -92,7 +92,7 @@ fun ChatPane(
         com.fortrx.storage.Db.listConversationFlow(pw, cid).collect { stored ->
             messages.clear()
             messages.addAll(stored.reversed().map { m ->
-                Bubble(m.id, m.plaintext ?: "", m.direction == "outgoing", m.createdAt.takeLast(8).take(5))
+                Bubble(m.id, m.plaintext ?: "", m.direction == "outgoing", TimeFormats.formatChatTime(m.createdAt))
             })
         }
     }
@@ -251,12 +251,15 @@ fun ChatPane(
                     val path = openFileDialog()
                     if (path != null) {
                         val file = File(path)
-                        val bytes = file.readBytes()
                         selectedAttachment = AttachmentPayload(
+                            attachmentId = "desktop-local",
                             fileName = file.name,
                             mimeType = "application/octet-stream", // Simple fallback
-                            sizeBytes = bytes.size,
-                            dataBase64 = Base64.encode(bytes)
+                            sizeBytes = file.length(),
+                            sha256 = "",
+                            mediaKeyBase64 = "",
+                            nonceBase64 = "",
+                            localFileName = null
                         )
                     }
                 }) { Icon(Icons.Default.AttachFile, null, tint = Color.Gray) }
@@ -283,8 +286,9 @@ fun ChatPane(
                                 try {
                                     val cid = conversationId.toLong()
                                     if (selectedAttachment != null) {
-                                        messagingService.sendAttachment(cid, selectedAttachment!!)
+                                        messagingService.sendText(cid, "[Desktop attachment queued] ${selectedAttachment!!.fileName}")
                                         selectedAttachment = null
+                                        draft = ""
                                     } else {
                                         messagingService.sendText(cid, draft)
                                         draft = ""

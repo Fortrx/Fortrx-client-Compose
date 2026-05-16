@@ -21,8 +21,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -32,6 +30,10 @@ import cafe.adriel.voyager.koin.koinScreenModel
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
 import com.fortrx.services.BackupCode
+import com.fortrx.platform.BinaryDocument
+import com.fortrx.platform.rememberOpenBytesLauncher
+import com.fortrx.platform.rememberSaveBytesLauncher
+import kotlinx.coroutines.launch
 
 class SettingsScreen : Screen {
     @OptIn(ExperimentalMaterial3Api::class)
@@ -42,15 +44,39 @@ class SettingsScreen : Screen {
         val username by screenModel.username.collectAsState()
         val userId by screenModel.userId.collectAsState()
         val backupCode by screenModel.backupCode.collectAsState()
-        val clipboardManager = LocalClipboardManager.current
+        val isBusy by screenModel.isBusy.collectAsState()
 
         var showLogoutDialog by remember { mutableStateOf(false) }
         var showDeleteDialog by remember { mutableStateOf(false) }
-        var isBackupVisible by remember { mutableStateOf(false) }
+        var pendingBackupCode by remember { mutableStateOf<String?>(null) }
+        var pendingRestoreFile by remember { mutableStateOf<BinaryDocument?>(null) }
+        var restoreCode by remember { mutableStateOf("") }
+        var showRestoreDialog by remember { mutableStateOf(false) }
+        var deletePassword by remember { mutableStateOf("") }
+        val snackbarHostState = remember { SnackbarHostState() }
+        val scope = rememberCoroutineScope()
+        val saveLauncher = rememberSaveBytesLauncher(
+            onSaved = {
+                pendingBackupCode?.let(screenModel::revealBackupCode)
+                pendingBackupCode = null
+            },
+            onError = {
+                pendingBackupCode = null
+                scope.launch { snackbarHostState.showSnackbar(it) }
+            }
+        )
+        val openLauncher = rememberOpenBytesLauncher(
+            onOpened = {
+                pendingRestoreFile = it
+                showRestoreDialog = true
+            },
+            onError = { message -> scope.launch { snackbarHostState.showSnackbar(message) } }
+        )
         
         val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
         Scaffold(
+            snackbarHost = { SnackbarHost(snackbarHostState) },
             modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
             topBar = {
                 MediumTopAppBar(
@@ -74,6 +100,17 @@ class SettingsScreen : Screen {
                 )
             }
         ) { padding ->
+            LaunchedEffect(Unit) {
+                screenModel.effects.collect { effect ->
+                    when (effect) {
+                        is SettingsScreenModel.Effect.ShowMessage -> snackbarHostState.showSnackbar(effect.message)
+                        is SettingsScreenModel.Effect.SaveBackup -> {
+                            pendingBackupCode = effect.result.code
+                            saveLauncher.launch(effect.result.fileName, effect.result.archiveBytes)
+                        }
+                    }
+                }
+            }
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -91,30 +128,13 @@ class SettingsScreen : Screen {
                 SettingsCard {
                     SettingsItem(
                         icon = Icons.Default.Security,
-                        title = "Generate Backup Phrase",
-                        subtitle = "Create a recovery code only when needed",
-                        onClick = { 
-                            if (backupCode.isEmpty()) {
-                                screenModel.generateAndShowBackupCode()
-                                isBackupVisible = true
-                            } else {
-                                isBackupVisible = !isBackupVisible
-                            }
-                        },
-                        trailing = {
-                            if (backupCode.isNotEmpty()) {
-                                IconButton(onClick = { 
-                                    screenModel.clearBackupCode()
-                                    isBackupVisible = false
-                                }) {
-                                    Icon(Icons.Default.Close, contentDescription = "Clear")
-                                }
-                            }
-                        }
+                        title = "Backup Code",
+                        subtitle = "Shown briefly after a backup is saved",
+                        onClick = {},
                     )
                     
                     AnimatedVisibility(
-                        visible = isBackupVisible && backupCode.isNotEmpty(),
+                        visible = !backupCode.isNullOrBlank(),
                         enter = expandVertically() + fadeIn(),
                         exit = shrinkVertically() + fadeOut()
                     ) {
@@ -133,37 +153,27 @@ class SettingsScreen : Screen {
                             )
                             Spacer(Modifier.height(8.dp))
                             Text(
-                                BackupCode.format(backupCode),
+                                BackupCode.format(backupCode ?: ""),
                                 style = MaterialTheme.typography.bodyLarge,
                                 fontWeight = FontWeight.Bold,
                                 letterSpacing = 2.sp,
                                 textAlign = TextAlign.Center,
                                 modifier = Modifier.fillMaxWidth()
                             )
-                            Spacer(Modifier.height(12.dp))
-                            Button(
-                                onClick = { 
-                                    clipboardManager.setText(AnnotatedString(backupCode))
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(8.dp),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.primary,
-                                    contentColor = MaterialTheme.colorScheme.onPrimary
-                                )
-                            ) {
-                                Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text("Copy and save safely")
-                            }
                         }
                     }
 
                     SettingsItem(
                         icon = Icons.Default.Download,
-                        title = "Full Backup",
-                        subtitle = "Export all local data",
-                        onClick = { /* TODO: Implement full backup */ }
+                        title = "Create Encrypted Backup",
+                        subtitle = "Export messages, media, keys, and local state to a zip",
+                        onClick = { screenModel.exportBackup() }
+                    )
+                    SettingsItem(
+                        icon = Icons.Default.UploadFile,
+                        title = "Restore from Backup",
+                        subtitle = "Import a backup zip and merge it into this device",
+                        onClick = { openLauncher.launch() }
                     )
                     
                     var mediaVisible by remember { mutableStateOf(false) } // TODO: Sync with Settings
@@ -218,7 +228,7 @@ class SettingsScreen : Screen {
             AlertDialog(
                 onDismissRequest = { showLogoutDialog = false },
                 title = { Text("Log Out?", fontWeight = FontWeight.Bold) },
-                text = { Text("You will need your password and backup phrase to log back in if local data is cleared.") },
+                text = { Text("You will need your password and a backup archive plus code if local data is cleared.") },
                 confirmButton = {
                     Button(
                         onClick = {
@@ -226,6 +236,7 @@ class SettingsScreen : Screen {
                             screenModel.logout()
                             navigator.replaceAll(MainScreen())
                         },
+                        enabled = !isBusy,
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
                     ) {
                         Text("Log Out", fontWeight = FontWeight.Bold)
@@ -243,22 +254,83 @@ class SettingsScreen : Screen {
             AlertDialog(
                 onDismissRequest = { showDeleteDialog = false },
                 title = { Text("Delete Account?", fontWeight = FontWeight.Bold) },
-                text = { Text("This action is permanent and will delete all your data from our servers. You cannot undo this.") },
+                text = {
+                    Column {
+                        Text("This action is permanent and will delete all your data from our servers. You cannot undo this.")
+                        Spacer(Modifier.height(12.dp))
+                        OutlinedTextField(
+                            value = deletePassword,
+                            onValueChange = { deletePassword = it },
+                            singleLine = true,
+                            label = { Text("Confirm password") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                },
                 confirmButton = {
                     Button(
                         onClick = {
                             showDeleteDialog = false
-                            screenModel.deleteAccount {
+                            screenModel.deleteAccount(deletePassword) {
+                                deletePassword = ""
                                 navigator.replaceAll(OnboardingScreen())
                             }
                         },
+                        enabled = deletePassword.isNotBlank(),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
                     ) {
                         Text("Delete Everything", fontWeight = FontWeight.Bold)
                     }
                 },
                 dismissButton = {
-                    TextButton(onClick = { showDeleteDialog = false }) {
+                    TextButton(onClick = { showDeleteDialog = false; deletePassword = "" }) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
+
+        if (showRestoreDialog && pendingRestoreFile != null) {
+            AlertDialog(
+                onDismissRequest = {
+                    showRestoreDialog = false
+                    restoreCode = ""
+                    pendingRestoreFile = null
+                },
+                title = { Text("Restore Backup") },
+                text = {
+                    Column {
+                        Text("Selected file: ${pendingRestoreFile!!.displayName}")
+                        Spacer(Modifier.height(12.dp))
+                        OutlinedTextField(
+                            value = restoreCode,
+                            onValueChange = { restoreCode = it },
+                            label = { Text("36-digit backup code") },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isBusy,
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            val file = pendingRestoreFile ?: return@Button
+                            screenModel.restoreBackup(file.displayName, file.bytes, restoreCode)
+                            showRestoreDialog = false
+                            restoreCode = ""
+                            pendingRestoreFile = null
+                        },
+                        enabled = BackupCode.isValid(restoreCode) && !isBusy
+                    ) {
+                        Text("Restore")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        showRestoreDialog = false
+                        restoreCode = ""
+                        pendingRestoreFile = null
+                    }) {
                         Text("Cancel")
                     }
                 }

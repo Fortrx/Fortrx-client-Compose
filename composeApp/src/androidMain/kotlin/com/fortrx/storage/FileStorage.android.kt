@@ -20,6 +20,10 @@ actual object PlatformFileStorage {
         return if (file.exists()) file.readBytes() else null
     }
 
+    actual fun writeNamedFile(localFileName: String, bytes: ByteArray) {
+        File(rootDir, localFileName).writeBytes(bytes)
+    }
+
     actual fun deleteFile(localFileName: String) {
         File(rootDir, localFileName).delete()
     }

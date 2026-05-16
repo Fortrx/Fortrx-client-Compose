@@ -1,6 +1,7 @@
 package com.fortrx.storage
 
 import com.fortrx.platform.debugLog
+import com.fortrx.crypto.constantTimeStringEquals
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
@@ -20,9 +21,11 @@ internal const val SALT_SIZE = 32
 internal const val NONCE_SIZE = 12
 internal const val GCM_TAG_SIZE = 16
 internal const val PBKDF2_ITERATIONS = 480_000
+internal const val ITEM_KDF_ITERATIONS = 100_000
 internal const val KEY_SIZE_BYTES = 32
 
 expect fun secureRandomBytes(size: Int): ByteArray
+expect fun loadOrCreateMasterSalt(): ByteArray
 expect fun pbkdf2Sha256(password: String, salt: ByteArray, iterations: Int, keyLen: Int): ByteArray
 expect fun aesGcmEncrypt(key: ByteArray, nonce: ByteArray, plaintext: ByteArray): ByteArray
 expect fun aesGcmDecrypt(key: ByteArray, nonce: ByteArray, ciphertextAndTag: ByteArray): ByteArray
@@ -38,10 +41,11 @@ private fun deriveKey(password: String, salt: ByteArray): ByteArray =
 @OptIn(ExperimentalEncodingApi::class)
 private fun getMasterKey(password: String): String {
     val cached = MasterKeyCache.masterKey
-    if (cached != null && MasterKeyCache.lastPassword == password) return cached
+    if (cached != null && MasterKeyCache.lastPassword != null &&
+        constantTimeStringEquals(MasterKeyCache.lastPassword!!, password)) return cached // FIXED: Constant-Time Password Comparison
     
     debugLog("Deriving storage master key.")
-    val salt = "fortrx-master-salt-v1".encodeToByteArray()
+    val salt = loadOrCreateMasterSalt() // FIXED: Static PBKDF2 Salt for Master Key
     val key = try {
         deriveKey(password, salt)
     } catch (e: Exception) {
@@ -64,7 +68,7 @@ internal fun encrypt(data: ByteArray, password: String): ByteArray {
     val nonce = secureRandomBytes(NONCE_SIZE)
     
     val itemKey = try {
-        pbkdf2Sha256(masterKey, salt, 1, KEY_SIZE_BYTES)
+        pbkdf2Sha256(masterKey, salt, ITEM_KDF_ITERATIONS, KEY_SIZE_BYTES) // FIXED: 1-Iteration PBKDF2 for Per-Item Keys
     } catch (e: Exception) {
         debugLog("Item key derivation failed during encryption.", e)
         throw e
@@ -89,7 +93,7 @@ internal fun decrypt(data: ByteArray, password: String): ByteArray = try {
         val nonce = data.copyOfRange(off, off + NONCE_SIZE); off += NONCE_SIZE
         val ct = data.copyOfRange(off, data.size)
         
-        val itemKey = pbkdf2Sha256(masterKey, salt, 1, KEY_SIZE_BYTES)
+        val itemKey = pbkdf2Sha256(masterKey, salt, ITEM_KDF_ITERATIONS, KEY_SIZE_BYTES) // FIXED: 1-Iteration PBKDF2 for Per-Item Keys
         aesGcmDecrypt(itemKey, nonce, ct)
     } else if (startsWith(data, FORMAT_V2_MAGIC)) {
         val min = FORMAT_V2_MAGIC.size + SALT_SIZE + NONCE_SIZE + GCM_TAG_SIZE

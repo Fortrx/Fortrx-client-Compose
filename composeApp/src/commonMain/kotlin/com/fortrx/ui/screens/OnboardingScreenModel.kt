@@ -3,6 +3,7 @@ package com.fortrx.ui.screens
 import cafe.adriel.voyager.core.model.ScreenModel
 import cafe.adriel.voyager.core.model.screenModelScope
 import com.fortrx.FortrxClient
+import com.fortrx.services.BackupArchiveService
 import com.fortrx.services.OnboardingService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -10,7 +11,8 @@ import kotlinx.coroutines.launch
 
 class OnboardingScreenModel(
     private val onboardingService: OnboardingService,
-    private val fortrxClient: FortrxClient
+    private val fortrxClient: FortrxClient,
+    private val backupArchiveService: BackupArchiveService,
 ) : ScreenModel {
     private val _uiState = MutableStateFlow<OnboardingState>(OnboardingState.Idle)
     val uiState: StateFlow<OnboardingState> = _uiState
@@ -18,7 +20,7 @@ class OnboardingScreenModel(
     sealed class OnboardingState {
         object Idle : OnboardingState()
         object Loading : OnboardingState()
-        data class Success(val backupCode: String?) : OnboardingState()
+        object Success : OnboardingState()
         data class Error(val message: String) : OnboardingState()
     }
 
@@ -30,17 +32,27 @@ class OnboardingScreenModel(
         executeOnboarding(password) { onboardingService.login(username.lowercase().trim(), password) }
     }
 
-    fun restore(username: String, password: String, backupPhrase: String) {
-        executeOnboarding(password) { onboardingService.restore(username.lowercase().trim(), password, backupPhrase) }
+    fun restore(username: String, password: String, documentName: String, bytes: ByteArray, code: String) {
+        screenModelScope.launch {
+            _uiState.value = OnboardingState.Loading
+            try {
+                onboardingService.restore(username.lowercase().trim(), password)
+                backupArchiveService.restoreBackupArchive(documentName, bytes, code)
+                fortrxClient.startSyncEngine(password)
+                _uiState.value = OnboardingState.Success
+            } catch (t: Throwable) {
+                _uiState.value = OnboardingState.Error(t.message ?: "Authentication failed")
+            }
+        }
     }
 
     private fun executeOnboarding(password: String, block: suspend () -> OnboardingService.OnboardingResult) {
         screenModelScope.launch {
             _uiState.value = OnboardingState.Loading
             try {
-                val result = block()
+                block()
                 fortrxClient.startSyncEngine(password)
-                _uiState.value = OnboardingState.Success(result.backupCode)
+                _uiState.value = OnboardingState.Success
             } catch (t: Throwable) {
                 _uiState.value = OnboardingState.Error(t.message ?: "Authentication failed")
             }

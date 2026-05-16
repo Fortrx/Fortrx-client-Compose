@@ -8,4 +8,11 @@ object Settings {
     var storagePassword: String? = null
     var myId: Long? = null
     var myUsername: String? = null
+    var myDeviceId: String? = null
+
+    /**
+     * The ID of the contact whose chat is currently visible to the user.
+     * Used to suppress redundant notifications.
+     */
+    var currentlyOpenContactId: Long? = null
 }

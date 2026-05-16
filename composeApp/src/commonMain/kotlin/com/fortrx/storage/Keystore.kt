@@ -5,9 +5,12 @@ import com.fortrx.platform.debugLog
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
 
 object Keystore {
     private val json = Json { ignoreUnknownKeys = true }
@@ -43,4 +46,19 @@ object Keystore {
     }
 
     fun keysExist(): Boolean = Db.keysExist()
+
+    suspend fun getOrGenerateBackupSalt(password: String): ByteArray {
+        val keys = loadKeys(password) ?: return com.fortrx.platform.SecureRandomBytes.nextBytes(32)
+        val saltHex = keys["backup_kdf_salt"]?.jsonPrimitive?.contentOrNull
+        if (saltHex != null) {
+            return saltHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        }
+        val newSalt = com.fortrx.platform.SecureRandomBytes.nextBytes(32)
+        val updatedKeys = buildJsonObject {
+            keys.forEach { (k, v) -> put(k, v) }
+            put("backup_kdf_salt", newSalt.joinToString("") { "%02x".format(it) })
+        }
+        saveKeys(updatedKeys, password)
+        return newSalt
+    } // FIXED: Hardcoded Backup Salt
 }

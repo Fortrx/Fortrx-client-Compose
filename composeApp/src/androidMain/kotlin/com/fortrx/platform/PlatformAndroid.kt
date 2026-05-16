@@ -84,10 +84,15 @@ actual object PlatformClock {
     actual fun nowIso(): String = if (android.os.Build.VERSION.SDK_INT >= 26) {
         java.time.Instant.now().toString()
     } else {
-        // Simple fallback for older Android versions
         java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US).apply {
             timeZone = java.util.TimeZone.getTimeZone("UTC")
         }.format(java.util.Date())
+    }
+
+    actual fun nowIsoLocal(): String = if (android.os.Build.VERSION.SDK_INT >= 26) {
+        java.time.ZonedDateTime.now().toString()
+    } else {
+        java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", java.util.Locale.US).format(java.util.Date())
     }
 }
 
@@ -105,3 +110,21 @@ actual fun isDebugRuntime(): Boolean {
 }
 
 actual fun readRuntimeEnv(name: String): String? = runCatching { System.getenv(name) }.getOrNull()
+
+actual fun startBackgroundSync() {
+    val context = AndroidContextHolder.appContext
+    val intent = android.content.Intent(context, com.fortrx.android.SyncService::class.java)
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+        context.startForegroundService(intent)
+    } else {
+        context.startService(intent)
+    }
+}
+
+actual fun stopBackgroundSync() {
+    val context = AndroidContextHolder.appContext
+    val intent = android.content.Intent(context, com.fortrx.android.SyncService::class.java).apply {
+        action = "STOP"
+    }
+    context.startService(intent)
+}

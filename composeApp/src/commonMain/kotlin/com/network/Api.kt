@@ -2,6 +2,7 @@ package com.fortrx.network
 
 import com.fortrx.Settings
 import com.fortrx.platform.debugLog
+import com.fortrx.platform.getPlatformName
 import com.fortrx.platform.isDebugRuntime
 import com.fortrx.storage.SettingsStore
 import com.fortrx.storage.TokenStore
@@ -42,9 +43,15 @@ object Api {
     val baseUrl: String get() = normalizedBaseUrl()
     val json: Json = Json { ignoreUnknownKeys = true; encodeDefaults = false }
     @Volatile private var token: String? = null
+    @Volatile private var deviceId: String? = null
     private val authRefreshMutex = Mutex()
     fun setToken(value: String?) { token = value }
     fun getToken(): String? = token
+    fun setSession(session: AuthSession?) {
+        token = session?.accessToken
+        deviceId = session?.deviceId
+        Settings.myDeviceId = session?.deviceId
+    }
 
     val client: HttpClient by lazy {
         HttpClient(httpEngineFactory()) {
@@ -56,6 +63,7 @@ object Api {
             }
             defaultRequest {
                 this@Api.token?.let { header(HttpHeaders.Authorization, "Bearer $it") }
+                this@Api.deviceId?.let { header("X-Device-Id", it) }
             }
         }
     }
@@ -124,29 +132,37 @@ object Api {
     }
 
     suspend fun refreshAccessTokenIfPossible(previousToken: String? = token): Boolean {
-        val username = Settings.myUsername ?: SettingsStore.loadUsername()
         val password = Settings.storagePassword ?: SettingsStore.loadStoragePassword()
-        if (username.isNullOrBlank() || password.isNullOrBlank()) return false
+        val session = TokenStore.loadSession(password)
+        if (session?.refreshToken.isNullOrBlank()) {
+            val username = Settings.myUsername ?: SettingsStore.loadUsername()
+            if (username.isNullOrBlank() || password.isNullOrBlank()) return false
+            return authRefreshMutex.withLock {
+                if (!token.isNullOrBlank() && token != previousToken) return@withLock true
+                val refreshed = runCatching {
+                    AuthApi.login(username, password)
+                }.getOrNull() ?: return@withLock false
+                setSession(refreshed)
+                try {
+                    TokenStore.saveSession(refreshed, password)
+                } catch (_: Throwable) {
+                }
+                Settings.myUsername = username
+                true
+            }
+        }
 
         return authRefreshMutex.withLock {
             if (!token.isNullOrBlank() && token != previousToken) return@withLock true
 
-            val response = runCatching {
-                rawPostForm(
-                    endpoint = "/auth/login",
-                    form = mapOf("username" to username, "password" to password),
-                )
+            val refreshedSession = runCatching {
+                AuthApi.refresh(session!!.refreshToken!!)
             }.getOrNull() ?: return@withLock false
-
-            if (!response.status.isSuccess()) return@withLock false
-            val body = runCatching { jsonObject(response) }.getOrNull() ?: return@withLock false
-            val refreshedToken = body["access_token"]?.jsonPrimitive?.contentOrNull ?: return@withLock false
-            setToken(refreshedToken)
-            Settings.myUsername = username
+            setSession(refreshedSession)
+            Settings.myDeviceId = refreshedSession.deviceId ?: Settings.myDeviceId
             try {
-                TokenStore.saveToken(password, refreshedToken)
+                TokenStore.saveSession(refreshedSession, password)
             } catch (_: Throwable) {
-                // Keep the in-memory token even if secure persistence fails.
             }
             true
         }

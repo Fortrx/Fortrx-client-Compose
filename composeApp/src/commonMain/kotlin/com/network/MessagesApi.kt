@@ -9,12 +9,13 @@ import kotlinx.serialization.json.put
 
 object MessagesApi {
     suspend fun sendMessage(recipientId: Long, sealedBlob: String, messageNumber: Long,
-        ttlSeconds: Long? = null): JsonObject {
+        ttlSeconds: Long? = null, attachmentId: String? = null): JsonObject {
         require(recipientId > 0) { "Recipient id must be positive" }
         val body = buildJsonObject {
             put("recipient_id", recipientId); put("sealed_blob", sealedBlob)
             put("message_number", messageNumber)
             ttlSeconds?.let { put("ttl_seconds", it) }
+            attachmentId?.let { put("attachment_id", it) }
         }
         val res = Api.postJson("/messages/send", body)
         Api.raiseForStatus(res, "send_message"); return Api.jsonObject(res)
