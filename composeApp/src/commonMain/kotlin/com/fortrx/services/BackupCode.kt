@@ -11,13 +11,13 @@ object BackupCode {
     /** Generate a fresh backup code. */
     fun generate(digits: Int = 32): String {
         require(digits in 30..36) { "Enter backup code" }
-        val bytes = SecureRandomBytes.nextBytes(digits)
         val sb = StringBuilder(digits)
-        for (b in bytes) {
-            sb.append((b.toInt() and 0xFF) % 10)
+        while (sb.length < digits) {
+            val b = SecureRandomBytes.nextBytes(1)[0].toInt() and 0xFF
+            if (b < 250) sb.append(b % 10)
         }
         return sb.toString()
-    }
+    } // FIXED: Fix Modulo Bias in Backup Code Generation
 
     /** Display form: groups of four separated by hyphens. */
     fun format(code: String): String =
@@ -32,12 +32,16 @@ object BackupCode {
     }
 
     /** Derives a 32-byte seed from the numeric backup phrase for key restoration. */
-    fun deriveSeed(code: String): ByteArray {
+    fun deriveSeed(code: String, salt: ByteArray): ByteArray {
         val normalized = normalize(code)
         val input = if (normalized.length >= 30) normalized else code.padEnd(32, '0').take(32)
         // Use PBKDF2 to turn the numeric string into a high-entropy 32-byte seed.
-        // We use a fixed salt for derivation from the backup phrase.
-        val salt = "fortrx-backup-salt".encodeToByteArray()
         return com.fortrx.storage.pbkdf2Sha256(input, salt, 100_000, 32)
+    } // FIXED: Hardcoded Backup Salt
+
+    fun deriveArchiveKey(code: String, salt: ByteArray): ByteArray {
+        val normalized = normalize(code)
+        require(normalized.length in 30..36) { "Invalid backup code." }
+        return com.fortrx.storage.pbkdf2Sha256(normalized, salt, 150_000, 32)
     }
 }

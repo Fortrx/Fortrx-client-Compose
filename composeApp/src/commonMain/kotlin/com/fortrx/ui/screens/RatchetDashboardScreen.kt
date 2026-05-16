@@ -24,6 +24,7 @@ import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
 import com.fortrx.Settings
 import com.fortrx.crypto.RatchetState
+import com.fortrx.platform.isDebugRuntime
 import com.fortrx.storage.Db
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.decodeFromString
@@ -129,16 +130,19 @@ class RatchetDashboardScreen(val contactId: Long) : Screen {
                     
                     Spacer(Modifier.height(16.dp))
                     
-                    RatchetCard("Advanced (Raw Data)") {
-                        Text(
-                            blob,
-                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
-                                .padding(12.dp),
-                            maxLines = 5
-                        )
+                    if (isDebugRuntime()) {
+                        Spacer(Modifier.height(16.dp))
+                        RatchetCard("Advanced (Raw Data)") {
+                            Text(
+                                blob,
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+                                    .padding(12.dp),
+                                maxLines = 5
+                            )
+                        }
                     }
                 } else {
                     Text("Error parsing session state.", color = MaterialTheme.colorScheme.error)

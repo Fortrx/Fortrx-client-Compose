@@ -2,13 +2,17 @@ package com.fortrx.crypto
 
 /** Port of `client/crypto/fingerprint.py` — pure Kotlin, uses `CryptoPrimitives.sha512`. */
 object Fingerprint {
-    fun computeKeyFingerprint(publicKey: ByteArray, userId: Int): ByteArray {
+    fun computeKeyFingerprint(publicKey: ByteArray, userId: Long): ByteArray {
         val userIdBytes = byteArrayOf(
+            ((userId ushr 56) and 0xFF).toByte(),
+            ((userId ushr 48) and 0xFF).toByte(),
+            ((userId ushr 40) and 0xFF).toByte(),
+            ((userId ushr 32) and 0xFF).toByte(),
             ((userId ushr 24) and 0xFF).toByte(),
             ((userId ushr 16) and 0xFF).toByte(),
             ((userId ushr 8) and 0xFF).toByte(),
             (userId and 0xFF).toByte(),
-        )
+        ) // FIXED: Safety Number Fingerprint Uses 32-bit User ID
         val hashMaterial = publicKey + userIdBytes
         var result = hashMaterial
         repeat(5200) { result = CryptoPrimitives.sha512(result + hashMaterial) }
@@ -34,7 +38,7 @@ object Fingerprint {
         val theirFingerprint: String,
     )
 
-    fun generateSafetyNumber(localId: Int, localIk: ByteArray, remoteId: Int, remoteIk: ByteArray): SafetyNumber {
+    fun generateSafetyNumber(localId: Long, localIk: ByteArray, remoteId: Long, remoteIk: ByteArray): SafetyNumber {
         val local = computeKeyFingerprint(localIk, localId)
         val remote = computeKeyFingerprint(remoteIk, remoteId)
         val combined = if (localId < remoteId) local + remote else remote + local

@@ -20,10 +20,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.fortrx.desktop.ui.components.NewChatDialog
 import com.fortrx.services.MessagingService
+import com.fortrx.services.TimeFormats
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import org.koin.compose.koinInject
 
 data class ConversationPreview(
     val id: String,
@@ -41,6 +43,7 @@ fun ConversationList(
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val messagingService = koinInject<MessagingService>()
     var query by remember { mutableStateOf("") }
     val items = remember { mutableStateListOf<ConversationPreview>() }
     val yellow = Color(0xFFFFC107)
@@ -56,7 +59,7 @@ fun ConversationList(
                         id = s.contactId.toString(),
                         title = contact?.username ?: "User ${s.contactId}",
                         last = s.lastMessagePreview ?: "",
-                        time = s.lastMessageAt?.take(10) ?: "",
+                        time = TimeFormats.formatListDate(s.lastMessageAt),
                         unread = s.unreadCount.toInt()
                     )
                 })
@@ -77,7 +80,7 @@ fun ConversationList(
         searchLoading = true
         delay(300)
         remoteMatch = runCatching {
-            val user = MessagingService.getUserByUsername(trimmed)
+            val user = messagingService.getUserByUsername(trimmed)
             val userId = user["id"]?.jsonPrimitive?.longOrNull ?: return@runCatching null
             if (items.any { it.id == userId.toString() }) return@runCatching null
             

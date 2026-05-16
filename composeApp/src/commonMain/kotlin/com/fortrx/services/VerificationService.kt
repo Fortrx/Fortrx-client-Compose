@@ -15,14 +15,14 @@ object VerificationService {
     
     suspend fun getSafetyNumber(password: String, otherUserId: Long): Fingerprint.SafetyNumber = withContext(Dispatchers.Default) {
         val keys = Keystore.loadKeys(password) ?: error("Local keys missing")
-        val myId = keys["user_id"]?.jsonPrimitive?.longOrNull?.toInt() ?: 0
+        val myId = keys["user_id"]?.jsonPrimitive?.longOrNull ?: 0L
         val myIk = Base64.decode(keys["dh_public"]?.jsonPrimitive?.content ?: "")
         
         val bundle = KeysApi.fetchKeyBundle(otherUserId)
         val theirIk = bundle.requireBytes("identity_key")
         
-        Fingerprint.generateSafetyNumber(myId, myIk, otherUserId.toInt(), theirIk)
-    }
+        Fingerprint.generateSafetyNumber(myId, myIk, otherUserId, theirIk)
+    } // FIXED: Safety Number Fingerprint Uses 32-bit User ID
 
     private fun JsonObject.stringOrNull(key: String): String? =
         this[key]?.jsonPrimitive?.contentOrNull

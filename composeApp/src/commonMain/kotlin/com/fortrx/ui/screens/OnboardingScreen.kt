@@ -10,6 +10,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -20,6 +22,8 @@ import cafe.adriel.voyager.koin.koinScreenModel
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
 import com.fortrx.services.BackupCode
+import com.fortrx.platform.BinaryDocument
+import com.fortrx.platform.rememberOpenBytesLauncher
 import fortrxclient.composeapp.generated.resources.Res
 import fortrxclient.composeapp.generated.resources.bg_home_steampunk
 import org.jetbrains.compose.resources.painterResource
@@ -37,8 +41,12 @@ class OnboardingScreen : Screen {
         var username by remember { mutableStateOf("") }
         var email by remember { mutableStateOf("") }
         var password by remember { mutableStateOf("") }
-        var backupPhrase by remember { mutableStateOf("") }
-        var showBackupDialog by remember { mutableStateOf<String?>(null) }
+        var backupCode by remember { mutableStateOf("") }
+        var selectedBackup by remember { mutableStateOf<BinaryDocument?>(null) }
+        val backupPicker = rememberOpenBytesLauncher(
+            onOpened = { selectedBackup = it; screenModel.resetState() },
+            onError = { screenModel.resetState() }
+        )
 
         val loading = uiState is OnboardingScreenModel.OnboardingState.Loading
         val error = (uiState as? OnboardingScreenModel.OnboardingState.Error)?.message
@@ -46,17 +54,12 @@ class OnboardingScreen : Screen {
         val canSubmit = username.isNotBlank() &&
                 password.length >= 8 &&
                 (mode != OnboardingMode.Register || email.isNotBlank()) &&
-                (mode != OnboardingMode.Restore || BackupCode.isValid(backupPhrase)) &&
+                (mode != OnboardingMode.Restore || (selectedBackup != null && BackupCode.isValid(backupCode))) &&
                 !loading
 
         LaunchedEffect(uiState) {
             if (uiState is OnboardingScreenModel.OnboardingState.Success) {
-                val success = uiState as OnboardingScreenModel.OnboardingState.Success
-                if (success.backupCode != null) {
-                    showBackupDialog = success.backupCode
-                } else {
-                    navigator.replaceAll(ChatListScreen())
-                }
+                navigator.replaceAll(ChatListScreen())
             }
         }
 
@@ -66,7 +69,20 @@ class OnboardingScreen : Screen {
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,
-                alpha = 0.2f
+                alpha = 0.1f
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color(0xFFF4EEE2).copy(alpha = 0.96f),
+                                Color(0xFFE4D6BE).copy(alpha = 0.9f),
+                                Color(0xFFD9C6A5).copy(alpha = 0.94f)
+                            )
+                        )
+                    )
             )
 
             Box(
@@ -80,6 +96,8 @@ class OnboardingScreen : Screen {
                         .align(Alignment.Center)
                         .fillMaxWidth()
                         .widthIn(max = 480.dp)
+                        .clip(RoundedCornerShape(28.dp))
+                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.88f))
                         .verticalScroll(rememberScrollState())
                         .padding(horizontal = 24.dp, vertical = 32.dp),
                 ) {
@@ -128,10 +146,27 @@ class OnboardingScreen : Screen {
 
                     if (mode == OnboardingMode.Restore) {
                         Spacer(Modifier.height(16.dp))
+                        OutlinedButton(
+                            onClick = { backupPicker.launch() },
+                            enabled = !loading,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                        ) {
+                            Text(selectedBackup?.displayName ?: "Choose backup zip")
+                        }
+                        if (selectedBackup != null) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "Selected: ${selectedBackup!!.displayName}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(Modifier.height(16.dp))
                         OutlinedTextField(
-                            value = backupPhrase,
-                            onValueChange = { backupPhrase = it; screenModel.resetState() },
-                            label = { Text("Backup Phrase (30-36 digits)") },
+                            value = backupCode,
+                            onValueChange = { backupCode = it; screenModel.resetState() },
+                            label = { Text("Backup code (30-36 digits)") },
                             enabled = !loading,
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(16.dp),
@@ -164,7 +199,9 @@ class OnboardingScreen : Screen {
                             when (mode) {
                                 OnboardingMode.Register -> screenModel.register(username.trim(), email.trim(), password)
                                 OnboardingMode.Login -> screenModel.login(username.trim(), password)
-                                OnboardingMode.Restore -> screenModel.restore(username.trim(), password, backupPhrase.trim())
+                                OnboardingMode.Restore -> selectedBackup?.let {
+                                    screenModel.restore(username.trim(), password, it.displayName, it.bytes, backupCode.trim())
+                                }
                             }
                         },
                         enabled = canSubmit,
@@ -210,36 +247,6 @@ class OnboardingScreen : Screen {
                     }
                 }
             }
-        }
-
-        showBackupDialog?.let { code ->
-            AlertDialog(
-                onDismissRequest = { showBackupDialog = null; navigator.replaceAll(ChatListScreen()) },
-                title = { Text("Backup Phrase") },
-                text = {
-                    Column {
-                        Text("This is your unique recovery code. Write it down! You'll need it to log in on other devices or restore your account.")
-                        Spacer(Modifier.height(16.dp))
-                        Surface(
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                            shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                BackupCode.format(code),
-                                modifier = Modifier.padding(16.dp),
-                                style = MaterialTheme.typography.headlineSmall,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                },
-                confirmButton = {
-                    Button(onClick = { showBackupDialog = null; navigator.replaceAll(ChatListScreen()) }) {
-                        Text("I've written it down")
-                    }
-                }
-            )
         }
     }
 }

@@ -129,3 +129,5 @@ actual object CryptoPrimitives {
     actual fun randomBytes(size: Int): ByteArray = ByteArray(size).also { rng.nextBytes(it) }
 }
 
+actual fun currentTimeMillis(): Long = System.currentTimeMillis() // FIXED: Skipped Message Keys Never Pruned
+

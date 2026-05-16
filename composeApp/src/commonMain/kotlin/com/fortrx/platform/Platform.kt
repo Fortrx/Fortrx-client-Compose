@@ -31,6 +31,7 @@ expect object Ed25519 {
 
 expect object PlatformClock {
     fun nowIso(): String
+    fun nowIsoLocal(): String
 }
 
 expect fun getPlatformName(): String
@@ -40,3 +41,6 @@ expect fun initPlatform(context: Any? = null)
 expect fun isDebugRuntime(): Boolean
 
 expect fun readRuntimeEnv(name: String): String?
+
+expect fun startBackgroundSync()
+expect fun stopBackgroundSync()

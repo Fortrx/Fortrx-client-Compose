@@ -9,6 +9,8 @@ import com.fortrx.platform.getPlatformName
 import com.fortrx.storage.Db
 import com.fortrx.storage.SettingsStore
 import com.fortrx.storage.TokenStore
+import com.fortrx.platform.startBackgroundSync
+import com.fortrx.platform.stopBackgroundSync
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.long
@@ -22,6 +24,7 @@ class FortrxClient(
     val onboarding: OnboardingService,
     val messaging: MessagingService
 ) {
+    private var clientScope = CoroutineScope(SupervisorJob() + Dispatchers.Default) // FIXED: Replace GlobalScope in FortrxClient
     private var syncEngine: SyncEngine? = null
 
     fun isSyncRunning(): Boolean = syncEngine != null
@@ -39,6 +42,7 @@ class FortrxClient(
                 Settings.storagePassword = password
                 Settings.myId = userId
                 Settings.myUsername = SettingsStore.loadUsername()
+                Settings.myDeviceId = SettingsStore.loadDeviceId()
                 startSyncEngine(password)
                 true
             } else {
@@ -56,6 +60,7 @@ class FortrxClient(
                 Settings.storagePassword = password
                 Settings.myId = userId
                 Settings.myUsername = SettingsStore.loadUsername()
+                Settings.myDeviceId = SettingsStore.loadDeviceId()
                 SettingsStore.saveStoragePassword(password)
                 if (userId != null) SettingsStore.saveMyId(userId)
                 startSyncEngine(password)
@@ -70,16 +75,17 @@ class FortrxClient(
 
     fun startSyncEngine(password: String) {
         if (syncEngine != null) return
-        @OptIn(DelicateCoroutinesApi::class)
-        GlobalScope.launch {
+        clientScope.launch { // FIXED: Replace GlobalScope in FortrxClient
             try {
                 val me = com.fortrx.network.AuthApi.getMe()
                 val userId = me["id"]?.jsonPrimitive?.long ?: return@launch
                 Settings.myUsername = me["username"]?.jsonPrimitive?.contentOrNull
                 Settings.myId = userId
-                val sessionId = "${getPlatformName()}-${userId}"
+                val stableDeviceId = Settings.myDeviceId ?: SettingsStore.loadDeviceId()
+                val sessionId = stableDeviceId ?: "${getPlatformName()}-${userId}"
                 syncEngine = SyncEngine(userId, sessionId, password, messaging)
                 syncEngine?.start { }
+                startBackgroundSync()
             } catch (e: Exception) {
                 debugLog("Sync engine startup failed.", e)
             }
@@ -89,6 +95,7 @@ class FortrxClient(
     fun stopSyncEngine() {
         syncEngine?.stop()
         syncEngine = null
+        stopBackgroundSync()
     }
 
     fun restartSyncEngine(password: String) {
@@ -98,13 +105,16 @@ class FortrxClient(
 
     fun logout() {
         stopSyncEngine()
+        clientScope.cancel() // FIXED: Replace GlobalScope in FortrxClient
+        clientScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         messaging.resetCaches()
-        TokenStore.deleteToken()
+        TokenStore.deleteSession()
         Db.close()
-        Api.setToken(null)
+        Api.setSession(null)
         Settings.storagePassword = null
         Settings.myId = null
         Settings.myUsername = null
+        Settings.myDeviceId = null
         SettingsStore.clear()
     }
 }

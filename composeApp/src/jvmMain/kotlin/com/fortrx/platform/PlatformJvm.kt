@@ -80,6 +80,7 @@ actual object Ed25519 {
 
 actual object PlatformClock {
     actual fun nowIso(): String = java.time.Instant.now().toString()
+    actual fun nowIsoLocal(): String = java.time.ZonedDateTime.now().toString()
 }
 
 actual fun getPlatformName(): String = "desktop"
@@ -96,3 +97,11 @@ actual fun isDebugRuntime(): Boolean {
 
 actual fun readRuntimeEnv(name: String): String? =
     System.getenv(name) ?: System.getProperty(name)
+
+actual fun startBackgroundSync() {
+    // Desktop is always "background" or closed; no special service needed here yet.
+}
+
+actual fun stopBackgroundSync() {
+    // No-op for desktop
+}

@@ -13,6 +13,7 @@ actual object SettingsStore {
     private const val KEY_MY_ID = "my_id"
     private const val KEY_USERNAME = "username"
     private const val KEY_BACKUP_CODE = "backup_code"
+    private const val KEY_DEVICE_ID = "device_id"
 
     private val prefs: SharedPreferences by lazy {
         val context = AndroidContextHolder.appContext
@@ -65,6 +66,12 @@ actual object SettingsStore {
     }
 
     actual fun loadBackupCode(): String? = prefs.getString(KEY_BACKUP_CODE, null)
+
+    actual fun saveDeviceId(deviceId: String) {
+        prefs.edit().putString(KEY_DEVICE_ID, deviceId).apply()
+    }
+
+    actual fun loadDeviceId(): String? = prefs.getString(KEY_DEVICE_ID, null)?.takeIf { it.isNotBlank() }
 
     actual fun clear() {
         prefs.edit().clear().apply()

@@ -3,16 +3,18 @@ package com.fortrx.storage
 import app.cash.sqldelight.coroutines.asFlow
 import app.cash.sqldelight.coroutines.mapToList
 import app.cash.sqldelight.db.SqlDriver
+import com.fortrx.messages.ChatPayload
 import com.fortrx.messages.ChatPayloadCodec
 import com.fortrx.platform.debugLog
 import com.fortrx.Settings
 import com.fortrx.db.FortrxDb
 import com.fortrx.platform.PlatformClock
+import com.fortrx.services.TimeFormats
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
-import kotlinx.datetime.Clock
+import kotlinx.serialization.Serializable
 
 expect fun createSqlDriver(dbFilePath: String, storagePassword: String): SqlDriver
 expect fun deleteDatabaseFile(dbName: String)
@@ -69,6 +71,13 @@ object Db {
     private val q get() = database.fortrxQueries
 
     // tokens
+    suspend fun saveSecret(password: String, name: String, value: String) = withContext(Dispatchers.Default) {
+        q.upsertToken(name, encrypt(value.encodeToByteArray(), password))
+    }
+    suspend fun loadSecret(password: String, name: String): String? = withContext(Dispatchers.Default) {
+        q.selectToken(name).executeAsOneOrNull()?.let { decrypt(it, password).decodeToString() }
+    }
+    fun deleteSecret(name: String) = q.deleteToken(name)
     suspend fun saveToken(password: String, token: String) = withContext(Dispatchers.Default) {
         q.upsertToken("auth", encrypt(token.encodeToByteArray(), password))
     }
@@ -77,10 +86,14 @@ object Db {
     }
     fun deleteToken() = q.deleteToken("auth")
 
+    fun saveMetadata(key: String, value: String) = q.upsertMetadata(key, value)
+    fun loadMetadata(key: String): String? = q.selectMetadata(key).executeAsOneOrNull()
+    fun deleteMetadata(key: String) = q.deleteMetadata(key)
+
     // private keys
     suspend fun saveKeys(password: String, userId: Long, keysJson: String) = withContext(Dispatchers.Default) {
         debugLog("Saving encrypted key material.")
-        q.upsertPrivateKeys(userId, encrypt(keysJson.encodeToByteArray(), password), nowIso())
+        q.upsertPrivateKeys(userId, encrypt(keysJson.encodeToByteArray(), password), PlatformClock.nowIso())
     }
     suspend fun loadKeys(password: String, userId: Long?): String? = withContext(Dispatchers.Default) {
         val blob = if (userId != null) q.selectPrivateKeysForUser(userId).executeAsOneOrNull()
@@ -102,7 +115,7 @@ object Db {
 
     // sessions
     suspend fun saveSessionBlob(password: String, otherUserId: Long, stateJson: String) = withContext(Dispatchers.Default) {
-        q.upsertSession(otherUserId, encrypt(stateJson.encodeToByteArray(), password), nowIso())
+        q.upsertSession(otherUserId, encrypt(stateJson.encodeToByteArray(), password), PlatformClock.nowIso())
     }
     suspend fun loadSessionBlob(password: String, otherUserId: Long): String? = withContext(Dispatchers.Default) {
         q.selectSession(otherUserId).executeAsOneOrNull()?.let { decrypt(it, password).decodeToString() }
@@ -115,7 +128,9 @@ object Db {
 
     // verifications
     fun saveVerification(userId: Long, safetyNumber: String) =
-        q.upsertVerification(userId, safetyNumber, nowIso())
+        q.upsertVerification(userId, safetyNumber, PlatformClock.nowIso())
+    fun deleteVerification(userId: Long) =
+        q.deleteVerification(userId)
     fun loadVerifications(): Map<Long, String> =
         q.selectAllVerifications().executeAsList().associate { it.contact_id to it.safety_number }
     fun isVerified(userId: Long): Boolean =
@@ -134,7 +149,7 @@ object Db {
             null -> if (existing?.isOnline == true) 1L else 0L
         }
         val lastSeen = when {
-            isOnline == true -> nowIso()
+            isOnline == true -> PlatformClock.nowIso()
             isOnline == false -> existing?.lastSeenAt
             else -> existing?.lastSeenAt
         }
@@ -146,6 +161,85 @@ object Db {
         val username: String?,
         val isOnline: Boolean,
         val lastSeenAt: String?,
+    )
+
+    @Serializable
+    data class BackupMetadataRecord(
+        val key: String,
+        val value: String,
+    )
+
+    @Serializable
+    data class BackupSecretRecord(
+        val name: String,
+        val value: String,
+    )
+
+    @Serializable
+    data class BackupPrivateKeyRecord(
+        val userId: Long,
+        val payloadJson: String,
+    )
+
+    @Serializable
+    data class BackupSessionRecord(
+        val contactId: Long,
+        val payloadJson: String,
+    )
+
+    @Serializable
+    data class BackupVerificationRecord(
+        val contactId: Long,
+        val safetyNumber: String,
+        val verifiedAt: String,
+    )
+
+    @Serializable
+    data class BackupContactRecord(
+        val userId: Long,
+        val username: String?,
+        val isOnline: Boolean,
+        val lastSeenAt: String?,
+    )
+
+    @Serializable
+    data class BackupConversationStateRecord(
+        val contactId: Long,
+        val lastViewedAt: String?,
+        val isPinned: Boolean,
+    )
+
+    @Serializable
+    data class BackupMessageRecord(
+        val id: Long,
+        val serverMessageId: Long?,
+        val contactId: Long,
+        val direction: String,
+        val senderId: Long?,
+        val recipientId: Long?,
+        val messageNumber: Long?,
+        val plaintext: String,
+        val createdAt: String,
+        val status: String,
+        val isPinned: Boolean,
+        val forwardedFromId: Long?,
+    )
+
+    @Serializable
+    data class BackupArchiveState(
+        val metadata: List<BackupMetadataRecord>,
+        val secrets: List<BackupSecretRecord>,
+        val privateKeys: List<BackupPrivateKeyRecord>,
+        val sessions: List<BackupSessionRecord>,
+        val verifications: List<BackupVerificationRecord>,
+        val contacts: List<BackupContactRecord>,
+        val conversationStates: List<BackupConversationStateRecord>,
+        val messages: List<BackupMessageRecord>,
+    )
+
+    data class ImportArchiveStats(
+        val importedMessages: Int,
+        val importedAttachments: Int,
     )
 
     fun getContact(userId: Long): StoredContact? =
@@ -174,22 +268,24 @@ object Db {
 
     suspend fun saveIncomingMessage(password: String, serverMessageId: Long?, contactId: kotlin.Long, senderId: Long?,
         messageNumber: Long?, plaintext: String?, sealedBlob: ByteArray?, createdAt: String,
-        expiresAt: String?, status: String, previewText: String? = plaintext) = withContext(Dispatchers.Default) {
+        expiresAt: String?, status: String, previewText: String? = plaintext): Long? = withContext(Dispatchers.Default) {
         
         val slimmedPt = ChatPayloadCodec.slimForStorage(plaintext)
         val pt = slimmedPt?.let { encrypt(it.encodeToByteArray(), password) }
         val preview = (previewText ?: plaintext)?.let { encrypt(it.encodeToByteArray(), password) }
 
         try {
-            database.transaction {
-                if (serverMessageId != null && q.existsServerMessage(serverMessageId).executeAsOne()) return@transaction
+            database.transactionWithResult {
+                if (serverMessageId != null && q.existsServerMessage(serverMessageId).executeAsOne()) return@transactionWithResult null
                 q.insertMessage(serverMessageId, contactId, "incoming", senderId, null, messageNumber,
-                    pt, sealedBlob, createdAt, nowIso(), expiresAt, status, 0, null)
+                    pt, sealedBlob, createdAt, PlatformClock.nowIso(), expiresAt, status, 0, null)
+                val id = q.lastInsertId().executeAsOne()
                 val unread = q.countUnreadMessages(contactId).executeAsOne()
-                q.upsertConversationSummary(contactId, null, createdAt, null, preview, "incoming", status, unread, 0)
+                q.upsertConversationSummary(contactId, id, createdAt, null, preview, "incoming", status, unread, 0)
+                id
             }
         } catch (t: Throwable) {
-            if (serverMessageId != null && isDuplicateServerMessageError(t)) return@withContext
+            if (serverMessageId != null && isDuplicateServerMessageError(t)) return@withContext null
             throw t
         }
     }
@@ -202,24 +298,17 @@ object Db {
         val pt = encrypt((slimmedPt ?: plaintext).encodeToByteArray(), password)
         val preview = encrypt(previewText.encodeToByteArray(), password)
         
-        var newId: Long = 0
-        try {
-            database.transaction {
-                if (serverMessageId != null && q.existsServerMessage(serverMessageId).executeAsOne()) {
-                    // return existing if already there (shouldn't happen for outgoing)
-                } else {
-                    q.insertMessage(serverMessageId, contactId, "outgoing", null, recipientId, messageNumber,
-                        pt, null, createdAt, null, expiresAt, status, 0, null)
-                    newId = q.lastInsertId().executeAsOne()
-                    q.upsertConversationSummary(contactId, null, createdAt, null, preview, "outgoing", status, 0, 0)
-                }
+        database.transactionWithResult {
+            if (serverMessageId != null && q.existsServerMessage(serverMessageId).executeAsOne()) {
+                q.lastInsertId().executeAsOne() // Should not happen for outgoing
+            } else {
+                q.insertMessage(serverMessageId, contactId, "outgoing", null, recipientId, messageNumber,
+                    pt, null, createdAt, null, expiresAt, status, 0, null)
+                val id = q.lastInsertId().executeAsOne()
+                q.upsertConversationSummary(contactId, id, createdAt, null, preview, "outgoing", status, 0, 0)
+                id
             }
-        } catch (t: Throwable) {
-            if (serverMessageId != null && isDuplicateServerMessageError(t)) {
-                // handle duplicate
-            } else throw t
         }
-        newId
     }
 
     fun updateMessageStatus(id: Long, status: String, serverMessageId: Long? = null) {
@@ -245,7 +334,9 @@ object Db {
                 r.unread_count,
                 r.is_pinned != 0L
             )
-        }
+        }.sortedWith(compareByDescending<ConversationSummary> { it.isPinned }
+            .thenByDescending { TimeFormats.sortEpochMillis(it.lastMessageAt) }
+            .thenBy { it.contactId })
     }
 
     data class ConversationOverview(
@@ -279,7 +370,9 @@ object Db {
                 r.recipient_id, r.message_number,
                 r.plaintext?.let { decrypt(it, password).decodeToString() },
                 r.created_at, r.status, r.is_pinned != 0L, r.forwarded_from_id)
-        }
+        }.sortedWith(compareByDescending<StoredMessage> { it.isPinned }
+            .thenByDescending { TimeFormats.sortEpochMillis(it.createdAt) }
+            .thenByDescending { it.id })
     }
 
     suspend fun searchMessages(password: String, query: String, limit: Long = 20, scanLimit: Long = 400): List<MessageSearchHit> =
@@ -296,7 +389,9 @@ object Db {
                     plaintext = plaintext,
                     createdAt = row.created_at,
                 )
-            }.take(limit.toInt())
+            }.sortedWith(compareByDescending<MessageSearchHit> { TimeFormats.sortEpochMillis(it.createdAt) }
+                .thenByDescending { it.messageId })
+                .take(limit.toInt())
         }
 
     suspend fun searchConversationMessages(
@@ -325,7 +420,10 @@ object Db {
                 isPinned = row.is_pinned != 0L,
                 forwardedFromId = row.forwarded_from_id
             )
-        }.take(limit.toInt()).reversed()
+        }.sortedWith(compareByDescending<StoredMessage> { TimeFormats.sortEpochMillis(it.createdAt) }
+            .thenByDescending { it.id })
+            .take(limit.toInt())
+            .reversed()
     }
 
     fun markConversationViewed(contactId: Long) = q.markConversationViewed(nowIso(), contactId)
@@ -336,14 +434,16 @@ object Db {
     }
 
     suspend fun getMessage(password: String, messageId: Long): StoredMessage? = withContext(Dispatchers.Default) {
-        // This is inefficient but selectConversation doesn't take messageId.
-        // Better to add a selectMessageById query in SQ file.
-        q.selectConversation(0, null, 1000).executeAsList().find { it.id == messageId }?.let { r ->
+        q.selectMessageById(messageId).executeAsOneOrNull()?.let { r ->
              StoredMessage(r.id, r.server_message_id, r.contact_id, r.direction, r.sender_id,
                 r.recipient_id, r.message_number,
                 r.plaintext?.let { decrypt(it, password).decodeToString() },
                 r.created_at, r.status, r.is_pinned != 0L, r.forwarded_from_id)
         }
+    }
+
+    suspend fun rewriteMessagePlaintext(password: String, messageId: Long, plaintext: String) = withContext(Dispatchers.Default) {
+        q.updateMessagePlaintext(encrypt(plaintext.encodeToByteArray(), password), messageId)
     }
 
     suspend fun deleteMessages(password: String, messageIds: Collection<Long>, contactId: Long) = withContext(Dispatchers.Default) {
@@ -358,6 +458,25 @@ object Db {
         database.transaction {
             q.deleteConversationMessages(contactId)
             q.deleteConversationSummary(contactId)
+        }
+    }
+
+    suspend fun listConversationAll(password: String, contactId: Long): List<StoredMessage> = withContext(Dispatchers.Default) {
+        q.selectConversationAll(contactId).executeAsList().map { r ->
+            StoredMessage(
+                id = r.id,
+                serverMessageId = r.server_message_id,
+                contactId = r.contact_id,
+                direction = r.direction,
+                senderId = r.sender_id,
+                recipientId = r.recipient_id,
+                messageNumber = r.message_number,
+                plaintext = r.plaintext?.let { decrypt(it, password).decodeToString() },
+                createdAt = r.created_at,
+                status = r.status,
+                isPinned = r.is_pinned != 0L,
+                forwardedFromId = r.forwarded_from_id,
+            )
         }
     }
 
@@ -382,7 +501,9 @@ object Db {
                     r.unread_count,
                     r.is_pinned != 0L
                 )
-            }
+            }.sortedWith(compareByDescending<ConversationSummary> { it.isPinned }
+                .thenByDescending { TimeFormats.sortEpochMillis(it.lastMessageAt) }
+                .thenBy { it.contactId })
         }
     }
 
@@ -400,7 +521,9 @@ object Db {
                     isOnline = (r.is_online ?: 0L) != 0L,
                     lastSeenAt = r.last_seen_at,
                 )
-            }
+            }.sortedWith(compareByDescending<ConversationOverview> { it.isPinned }
+                .thenByDescending { TimeFormats.sortEpochMillis(it.lastMessageAt) }
+                .thenBy { it.contactId })
         }
     }
 
@@ -424,8 +547,161 @@ object Db {
                     r.recipient_id, r.message_number,
                     r.plaintext?.let { decrypt(it, password).decodeToString() },
                     r.created_at, r.status, r.is_pinned != 0L, r.forwarded_from_id)
+            }.sortedWith(compareByDescending<StoredMessage> { it.isPinned }
+                .thenByDescending { TimeFormats.sortEpochMillis(it.createdAt) }
+                .thenByDescending { it.id })
+        }
+    }
+
+    suspend fun exportArchiveState(password: String): BackupArchiveState = withContext(Dispatchers.Default) {
+        BackupArchiveState(
+            metadata = q.selectAllMetadata().executeAsList().map { BackupMetadataRecord(it.key, it.value_) },
+            secrets = q.selectAllTokens().executeAsList().mapNotNull { row ->
+                runCatching { decrypt(row.value_, password).decodeToString() }.getOrNull()?.let { BackupSecretRecord(row.name, it) }
+            },
+            privateKeys = q.selectAllPrivateKeys().executeAsList().mapNotNull { row ->
+                runCatching { decrypt(row.payload, password).decodeToString() }.getOrNull()?.let { BackupPrivateKeyRecord(row.user_id, it) }
+            },
+            sessions = q.selectAllSessions().executeAsList().mapNotNull { row ->
+                runCatching { decrypt(row.payload, password).decodeToString() }.getOrNull()?.let { BackupSessionRecord(row.contact_id, it) }
+            },
+            verifications = q.selectAllVerifications().executeAsList().map {
+                BackupVerificationRecord(it.contact_id, it.safety_number, it.verified_at)
+            },
+            contacts = q.selectAllContacts().executeAsList().map {
+                BackupContactRecord(
+                    userId = it.user_id,
+                    username = it.username,
+                    isOnline = it.is_online != 0L,
+                    lastSeenAt = it.last_seen_at,
+                )
+            },
+            conversationStates = q.selectAllConversationSummaries().executeAsList().map {
+                BackupConversationStateRecord(
+                    contactId = it.contact_id,
+                    lastViewedAt = it.last_viewed_at,
+                    isPinned = it.is_pinned != 0L,
+                )
+            },
+            messages = q.selectAllMessages().executeAsList().mapNotNull { row ->
+                val plaintext = row.plaintext?.let { decrypt(it, password).decodeToString() } ?: return@mapNotNull null
+                BackupMessageRecord(
+                    id = row.id,
+                    serverMessageId = row.server_message_id,
+                    contactId = row.contact_id,
+                    direction = row.direction,
+                    senderId = row.sender_id,
+                    recipientId = row.recipient_id,
+                    messageNumber = row.message_number,
+                    plaintext = plaintext,
+                    createdAt = row.created_at,
+                    status = row.status,
+                    isPinned = row.is_pinned != 0L,
+                    forwardedFromId = row.forwarded_from_id,
+                )
+            },
+        )
+    }
+
+    suspend fun importArchiveState(
+        password: String,
+        state: BackupArchiveState,
+        attachmentBytes: Map<String, ByteArray>,
+        importKeysIfMissing: Boolean,
+    ): ImportArchiveStats = withContext(Dispatchers.Default) {
+        val existingFingerprintsByContact = mutableMapOf<Long, MutableSet<String>>()
+        val importedAttachmentNames = mutableSetOf<String>()
+        var importedMessages = 0
+
+        database.transaction {
+            state.contacts.forEach { contact ->
+                q.upsertContact(
+                    contact.userId,
+                    contact.username,
+                    if (contact.isOnline) 1L else 0L,
+                    contact.lastSeenAt,
+                )
+            }
+
+            state.metadata.forEach { metadata ->
+                q.upsertMetadata(metadata.key, metadata.value)
+            }
+
+            state.verifications.forEach { verification ->
+                q.upsertVerification(verification.contactId, verification.safetyNumber, verification.verifiedAt)
+            }
+
+            if (importKeysIfMissing) {
+                state.privateKeys.forEach { key ->
+                    q.upsertPrivateKeys(key.userId, encrypt(key.payloadJson.encodeToByteArray(), password), PlatformClock.nowIso())
+                }
+                state.sessions.forEach { session ->
+                    q.upsertSession(session.contactId, encrypt(session.payloadJson.encodeToByteArray(), password), PlatformClock.nowIso())
+                }
+            }
+
+            state.messages.sortedWith(compareBy<BackupMessageRecord> { TimeFormats.sortEpochMillis(it.createdAt) }.thenBy { it.contactId }).forEach { message ->
+                if (message.serverMessageId != null && q.existsServerMessage(message.serverMessageId).executeAsOne()) {
+                    return@forEach
+                }
+                val fingerprint = messageFingerprint(
+                    contactId = message.contactId,
+                    direction = message.direction,
+                    createdAt = message.createdAt,
+                    plaintext = message.plaintext,
+                )
+                val existingFingerprints = existingFingerprintsByContact.getOrPut(message.contactId) {
+                    q.selectConversationAll(message.contactId).executeAsList().mapNotNull { row ->
+                        row.plaintext?.let { decrypt(it, password).decodeToString() }?.let { plaintext ->
+                            messageFingerprint(row.contact_id, row.direction, row.created_at, plaintext)
+                        }
+                    }.toMutableSet()
+                }
+                if (existingFingerprints.contains(fingerprint)) {
+                    return@forEach
+                }
+
+                val finalPlaintext = restoreAttachmentPayload(message.plaintext, attachmentBytes, importedAttachmentNames)
+                q.insertMessage(
+                    message.serverMessageId,
+                    message.contactId,
+                    message.direction,
+                    message.senderId,
+                    message.recipientId,
+                    message.messageNumber,
+                    encrypt(finalPlaintext.encodeToByteArray(), password),
+                    null,
+                    message.createdAt,
+                    null,
+                    null,
+                    message.status,
+                    if (message.isPinned) 1L else 0L,
+                    message.forwardedFromId,
+                )
+                existingFingerprints += fingerprint
+                importedMessages++
+            }
+
+            state.conversationStates.forEach { conversation ->
+                if (conversation.isPinned) {
+                    q.updateConversationPinned(1L, conversation.contactId)
+                }
+                conversation.lastViewedAt?.let { q.updateConversationViewedAt(it, conversation.contactId) }
             }
         }
+
+        state.secrets.forEach { secret ->
+            q.upsertToken(secret.name, encrypt(secret.value.encodeToByteArray(), password))
+        }
+
+        state.conversationStates.forEach { conversation ->
+            refreshConversationSummary(password, conversation.contactId)
+        }
+
+        ImportArchiveStats(
+            importedMessages = importedMessages,
+            importedAttachments = importedAttachmentNames.size,
+        )
     }
 
     fun updateMessagePinned(messageId: Long, isPinned: Boolean) {
@@ -457,5 +733,24 @@ object Db {
             unread,
             latest.is_pinned
         )
+    }
+
+    private fun messageFingerprint(contactId: Long, direction: String, createdAt: String, plaintext: String): String =
+        listOf(contactId.toString(), direction, createdAt, plaintext).joinToString("|")
+
+    private fun restoreAttachmentPayload(
+        plaintext: String,
+        attachmentBytes: Map<String, ByteArray>,
+        importedAttachmentNames: MutableSet<String>,
+    ): String {
+        val payload = ChatPayloadCodec.decode(plaintext)
+        val attachmentPayload = (payload as? ChatPayload.Attachment)?.attachment ?: return plaintext
+        val localFileName = attachmentPayload.localFileName ?: return plaintext
+        val bytes = attachmentBytes[localFileName] ?: return plaintext
+        if (PlatformFileStorage.readFile(localFileName) == null) {
+            PlatformFileStorage.writeNamedFile(localFileName, bytes)
+            importedAttachmentNames += localFileName
+        }
+        return ChatPayloadCodec.encodeAttachment(attachmentPayload)
     }
 }

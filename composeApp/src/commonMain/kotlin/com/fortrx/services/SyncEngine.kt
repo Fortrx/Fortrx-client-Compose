@@ -86,6 +86,10 @@ class SyncEngine(
                     val synced = messagingService.fetchAndStoreInbox(storagePassword, userId)
                     synced.forEach { incoming ->
                         val senderId = incoming["sender_id"]?.jsonPrimitive?.longOrNull ?: return@forEach
+                        
+                        // Don't show notification if the chat is already open
+                        if (com.fortrx.Settings.currentlyOpenContactId == senderId) return@forEach
+
                         val sender = Db.getContact(senderId)?.username ?: "New message"
                         val preview = ChatPayloadCodec.previewText(incoming["body"]?.jsonPrimitive?.contentOrNull)
                         NotificationBridge.showIncomingMessage(sender, preview)

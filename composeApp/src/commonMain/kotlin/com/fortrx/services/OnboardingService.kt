@@ -7,6 +7,7 @@ import com.fortrx.network.AuthApi
 import com.fortrx.network.KeysApi
 import com.fortrx.network.Api
 import com.fortrx.platform.debugLog
+import com.fortrx.platform.SecureRandomBytes
 import com.fortrx.storage.Db
 import com.fortrx.storage.Keystore
 import com.fortrx.storage.SettingsStore
@@ -21,7 +22,7 @@ class OnboardingService(
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
-    data class OnboardingResult(val token: String, val backupCode: String? = null)
+    data class OnboardingResult(val token: String)
 
     private data class LocalKeyMaterial(
         val identity: KeyOps.IdentityKeypair,
@@ -68,21 +69,20 @@ class OnboardingService(
         Settings.myUsername = normalizedUsername
 
         // 2. Login to get token
-        val token = AuthApi.login(normalizedUsername, password)
+        val session = AuthApi.login(normalizedUsername, password)
         
         // 3. Initialize DB
         Settings.storagePassword = password
         Db.open(password, userId)
-        TokenStore.saveToken(token, password)
+        TokenStore.saveSession(session, password)
         SettingsStore.saveStoragePassword(password)
         SettingsStore.saveMyId(userId)
         SettingsStore.saveUsername(normalizedUsername)
+        SettingsStore.saveDeviceId(session.deviceId ?: "")
+        Settings.myDeviceId = session.deviceId
 
-        // 4. Generate keys. 
-        // We derive the seed deterministically from password and username if no backup phrase is used.
-        // This ensures the Identity Key is consistent across logins on different devices for the same user.
-        val combined = "$password:$normalizedUsername".encodeToByteArray()
-        val seed = hkdfDerive(combined, "fortrx-identity-master-seed-v1".encodeToByteArray(), byteArrayOf(), 32)
+        // 4. Generate fresh local key material for this device.
+        val seed = SecureRandomBytes.nextBytes(32)
         val keyMaterial = generateLocalKeyMaterial(seed)
 
         // 5. Upload bundle
@@ -99,16 +99,16 @@ class OnboardingService(
         Db.clearSessions()
         Keystore.saveKeys(keysJson, password)
         
-        return OnboardingResult(token, null)
+        return OnboardingResult(session.accessToken)
     }
 
-    suspend fun login(username: String, password: String, backupPhrase: String? = null): OnboardingResult {
+    suspend fun login(username: String, password: String): OnboardingResult {
         messagingService.resetCaches()
         val normalizedUsername = username.trim()
         debugLog("Starting login flow.")
-        val token = AuthApi.login(normalizedUsername, password)
+        val session = AuthApi.login(normalizedUsername, password)
         Settings.storagePassword = password
-        Api.setToken(token) // Temporarily set token to fetch 'me'
+        Api.setSession(session)
         
         val me = AuthApi.getMe()
         val userId = me["id"]?.jsonPrimitive?.longOrNull ?: 0L
@@ -117,70 +117,25 @@ class OnboardingService(
         Settings.myUsername = resolvedUsername
 
         Db.open(password, userId)
-        TokenStore.saveToken(token, password)
+        TokenStore.saveSession(session, password)
         SettingsStore.saveStoragePassword(password)
         SettingsStore.saveMyId(userId)
         SettingsStore.saveUsername(resolvedUsername)
+        SettingsStore.saveDeviceId(session.deviceId ?: "")
 
         Settings.storagePassword = password
         Settings.myId = userId
         Settings.myUsername = resolvedUsername
+        Settings.myDeviceId = session.deviceId
 
-        var newBackupCode: String? = null
-
-        if (backupPhrase != null) {
-            debugLog("Restoring key material from backup phrase.")
-            val seed = BackupCode.deriveSeed(backupPhrase)
-            val keyMaterial = generateLocalKeyMaterial(seed)
-            val keysJson = buildKeysJson(
-                userId,
-                keyMaterial.identity,
-                keyMaterial.signedPre,
-                keyMaterial.oneTimePrekeys,
-                keyMaterial.kyberPre,
-            )
-            Db.clearSessions()
-            Keystore.saveKeys(keysJson, password)
-            SettingsStore.saveBackupCode(backupPhrase)
-            
-            // Force upload bundle so the server knows we've restored/reset our keys
-            try {
-                uploadKeyBundle(keyMaterial)
-            } catch (e: Exception) {
-                debugLog("Key bundle upload during restore login failed.", e)
-            }
+        val existingKeys = Keystore.loadKeys(password, userId)
+        if (existingKeys == null) {
+            debugLog("Local keys are missing; waiting for explicit archive restore or fresh setup.")
         } else {
-            val existingKeys = Keystore.loadKeys(password, userId)
-            val storedBackupCode = SettingsStore.loadBackupCode()
-            if (existingKeys == null) {
-                debugLog("Local keys are missing; generating deterministic keys from credentials.")
-                val combined = "$password:$normalizedUsername".encodeToByteArray()
-                val seed = hkdfDerive(combined, "fortrx-identity-master-seed-v1".encodeToByteArray(), byteArrayOf(), 32)
-                val keyMaterial = generateLocalKeyMaterial(seed)
-                
-                val keysJson = buildKeysJson(
-                    userId,
-                    keyMaterial.identity,
-                    keyMaterial.signedPre,
-                    keyMaterial.oneTimePrekeys,
-                    keyMaterial.kyberPre,
-                )
-                Db.clearSessions()
-                Keystore.saveKeys(keysJson, password)
-                
-                try {
-                    uploadKeyBundle(keyMaterial)
-                } catch (e: Exception) {
-                    debugLog("Key bundle upload during auto-key generation failed.", e)
-                }
-            } else if (storedBackupCode.isNullOrBlank()) {
-                debugLog("Backup phrase missing on this device; preserving existing identity and sessions.")
-            } else {
-                debugLog("Existing local keys detected.")
-            }
+            debugLog("Existing local keys detected.")
         }
-        
-        return OnboardingResult(token, newBackupCode)
+
+        return OnboardingResult(session.accessToken)
     }
 
     suspend fun deleteAccount(password: String) {
@@ -195,21 +150,17 @@ class OnboardingService(
      * Performs a forced re-initialization of the client.
      * Wipes local state, logs in, and re-generates/re-uploads keys.
      */
-    suspend fun bootstrapForce(username: String, password: String, backupPhrase: String): OnboardingResult {
+    suspend fun bootstrapForce(username: String, password: String): OnboardingResult {
         debugLog("Starting bootstrap reset.")
         Db.deleteDatabase() // Reset local DB
         
-        val result = login(username, password, backupPhrase)
+        val result = login(username, password)
         debugLog("Bootstrap reset complete.")
         return result
     }
 
-    /**
-     * Restores an existing account using a username, password, and backup phrase.
-     * Reconstructs the identity keys from the backup phrase.
-     */
-    suspend fun restore(username: String, password: String, backupPhrase: String): OnboardingResult {
-        return login(username, password, backupPhrase)
+    suspend fun restore(username: String, password: String): OnboardingResult {
+        return login(username, password)
     }
 
     private suspend fun uploadKeyBundle(keyMaterial: LocalKeyMaterial) {

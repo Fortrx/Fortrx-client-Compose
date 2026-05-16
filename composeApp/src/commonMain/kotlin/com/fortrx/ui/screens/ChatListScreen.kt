@@ -10,6 +10,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Language
@@ -37,6 +38,7 @@ import cafe.adriel.voyager.koin.koinScreenModel
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
 import com.fortrx.platform.BackHandler
+import com.fortrx.services.TimeFormats
 import com.fortrx.storage.Db
 
 class ChatListScreen : Screen {
@@ -73,28 +75,53 @@ class ChatListScreen : Screen {
         Scaffold(
             snackbarHost = { SnackbarHost(snackbarHostState) },
             topBar = {
-                CenterAlignedTopAppBar(
-                    title = {
-                        Text(
-                            "Fortrx",
-                            style = MaterialTheme.typography.headlineMedium,
-                            fontWeight = FontWeight.Black,
-                            letterSpacing = (-0.5).sp
-                        )
-                    },
-                    actions = {
-                        IconButton(onClick = { navigator.push(SettingsScreen()) }) {
-                            Icon(
-                                Icons.Default.Settings, 
-                                contentDescription = "Settings", 
-                                tint = MaterialTheme.colorScheme.onBackground
+                if (state.selectedContactIds.isNotEmpty()) {
+                    CenterAlignedTopAppBar(
+                        title = {
+                            Text(
+                                "${state.selectedContactIds.size} selected",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Black,
                             )
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.background
+                        },
+                        navigationIcon = {
+                            IconButton(onClick = { screenModel.clearSelection() }) {
+                                Icon(Icons.Default.Close, contentDescription = "Clear selection")
+                            }
+                        },
+                        actions = {
+                            IconButton(onClick = { screenModel.deleteSelectedChats() }) {
+                                Icon(Icons.Default.Delete, contentDescription = "Delete chats")
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = MaterialTheme.colorScheme.background
+                        )
                     )
-                )
+                } else {
+                    CenterAlignedTopAppBar(
+                        title = {
+                            Text(
+                                "Fortrx",
+                                style = MaterialTheme.typography.headlineMedium,
+                                fontWeight = FontWeight.Black,
+                                letterSpacing = (-0.5).sp
+                            )
+                        },
+                        actions = {
+                            IconButton(onClick = { navigator.push(SettingsScreen()) }) {
+                                Icon(
+                                    Icons.Default.Settings,
+                                    contentDescription = "Settings",
+                                    tint = MaterialTheme.colorScheme.onBackground
+                                )
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = MaterialTheme.colorScheme.background
+                        )
+                    )
+                }
             },
             bottomBar = {
                 Surface(
@@ -223,7 +250,11 @@ class ChatListScreen : Screen {
 
                         items(state.filteredConversations) { row ->
                             ChatListItem(row, screenModel) {
-                                navigator.push(ChatScreen(row.contactId))
+                                if (state.selectedContactIds.isNotEmpty()) {
+                                    screenModel.toggleContactSelection(row.contactId)
+                                } else {
+                                    navigator.push(ChatScreen(row.contactId))
+                                }
                             }
                         }
                     }
@@ -284,7 +315,7 @@ class ChatListScreen : Screen {
                     Text(hit.plaintext, style = MaterialTheme.typography.bodyMedium, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 Text(
-                    hit.createdAt.substringAfter("T").take(5),
+                    TimeFormats.formatListTime(hit.createdAt),
                     style = MaterialTheme.typography.labelSmall,
                     color = Color.Gray
                 )
@@ -301,8 +332,20 @@ class ChatListScreen : Screen {
             modifier = Modifier
                 .fillMaxWidth()
                 .combinedClickable(
-                    onClick = onClick,
-                    onLongClick = { showMenu = true }
+                    onClick = {
+                        if (screenModel.state.value.selectedContactIds.isNotEmpty()) {
+                            screenModel.toggleContactSelection(row.contactId)
+                        } else {
+                            onClick()
+                        }
+                    },
+                    onLongClick = {
+                        if (screenModel.state.value.selectedContactIds.isNotEmpty()) {
+                            screenModel.toggleContactSelection(row.contactId)
+                        } else {
+                            screenModel.toggleContactSelection(row.contactId)
+                        }
+                    }
                 )
         ) {
             Row(
@@ -372,9 +415,8 @@ class ChatListScreen : Screen {
 
                 Column(horizontalAlignment = Alignment.End) {
                     row.lastMessageAt?.let { time ->
-                        val displayTime = time.substringAfter("T").take(5)
                         Text(
-                            displayTime,
+                            TimeFormats.formatListTime(time),
                             style = MaterialTheme.typography.labelSmall,
                             color = Color.Gray,
                             fontWeight = FontWeight.Bold
@@ -396,6 +438,15 @@ class ChatListScreen : Screen {
                                 )
                             }
                         }
+                    }
+                    if (screenModel.state.value.selectedContactIds.contains(row.contactId)) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "Selected",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }

@@ -21,6 +21,13 @@ class SyncService : Service(), KoinComponent {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == "STOP") {
+            fortrxClient.stopSyncEngine()
+            stopForeground(true)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         val password = SettingsStore.loadStoragePassword()
 
         if (password != null) {
@@ -46,10 +53,12 @@ class SyncService : Service(), KoinComponent {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Fortrx")
-            .setContentText("Syncing messages...")
+            .setContentText("Connected")
             .setSmallIcon(android.R.drawable.stat_notify_chat)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .build()
     }
 

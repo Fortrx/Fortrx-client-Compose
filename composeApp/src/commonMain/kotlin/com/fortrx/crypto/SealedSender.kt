@@ -20,7 +20,6 @@ object SealedSender {
     private val FSS2 = "FSS2".encodeToByteArray()
     private const val IDENTITY_KEY_SIZE = 32
     private const val MAC_SIZE = 32
-    private val CTR_IV = ByteArray(16)
     private val UNIDENTIFIED_DELIVERY_LABEL = "UnidentifiedDelivery".encodeToByteArray()
 
     @Serializable
@@ -53,7 +52,9 @@ object SealedSender {
         val eCipherKey = ephemeralMaterial.copyOfRange(32, 64)
         val eMacKey = ephemeralMaterial.copyOfRange(64, 96)
         
-        val eCiphertext = CryptoPrimitives.aesCtr(eCipherKey, CTR_IV, senderIkPublic)
+        val eCiphertext = CryptoPrimitives.randomBytes(16).let { iv ->
+            iv + CryptoPrimitives.aesCtr(eCipherKey, iv, senderIkPublic)
+        } // FIXED: Random IV in SealedSender
         val eMac = CryptoPrimitives.hmacSha256(eMacKey, eCiphertext)
 
         // 2. Sender layer
@@ -73,14 +74,16 @@ object SealedSender {
             header = Base64.encode(headerJson.encodeToByteArray())
         )
         val innerJson = json.encodeToString(InnerWire.serializer(), inner).encodeToByteArray()
-        val sCiphertext = CryptoPrimitives.aesCtr(sCipherKey, CTR_IV, innerJson)
+        val sCiphertext = CryptoPrimitives.randomBytes(16).let { iv ->
+            iv + CryptoPrimitives.aesCtr(sCipherKey, iv, innerJson)
+        } // FIXED: Random IV in SealedSender
         val sMac = CryptoPrimitives.hmacSha256(sMacKey, sCiphertext)
 
         val blob = FSS2 + ephemeralKp.publicKey + eCiphertext + eMac + sCiphertext + sMac
         return SealedEnvelope(blob)
     }
 
-    data class OpenedEnvelope(val senderId: Long, val ciphertext: ByteArray, val headerJson: String, val senderIkPublic: ByteArray)
+    data class OpenedEnvelope(val senderId: Long, val ciphertext: ByteArray, val headerJson: String, val senderIkPublic: ByteArray, val headerBytes: ByteArray)
 
     fun open(recipientIkPrivate: ByteArray, recipientIkPublic: ByteArray, envelope: ByteArray): OpenedEnvelope {
         if (!envelope.take(4).toByteArray().contentEquals(FSS2)) {
@@ -90,8 +93,8 @@ object SealedSender {
         var offset = FSS2.size
         val ephemeralPublic = envelope.copyOfRange(offset, offset + IDENTITY_KEY_SIZE)
         offset += IDENTITY_KEY_SIZE
-        val eCiphertext = envelope.copyOfRange(offset, offset + IDENTITY_KEY_SIZE)
-        offset += IDENTITY_KEY_SIZE
+        val eCiphertext = envelope.copyOfRange(offset, offset + 16 + IDENTITY_KEY_SIZE)
+        offset += 16 + IDENTITY_KEY_SIZE
         val eMac = envelope.copyOfRange(offset, offset + MAC_SIZE)
         offset += MAC_SIZE
         val sCiphertext = envelope.copyOfRange(offset, envelope.size - MAC_SIZE)
@@ -112,7 +115,9 @@ object SealedSender {
         val expectedEMac = CryptoPrimitives.hmacSha256(eMacKey, eCiphertext)
         if (!expectedEMac.contentEquals(eMac)) error("sealed sender identity MAC verification failed")
 
-        val senderIkPublic = CryptoPrimitives.aesCtr(eCipherKey, CTR_IV, eCiphertext)
+        val senderIkPublic = eCiphertext.copyOfRange(0, 16).let { iv ->
+            CryptoPrimitives.aesCtr(eCipherKey, iv, eCiphertext.copyOfRange(16, eCiphertext.size))
+        } // FIXED: Random IV in SealedSender
 
         // 2. Unseal sender
         val senderSharedSecret = CryptoPrimitives.x25519Diffie(recipientIkPrivate, senderIkPublic)
@@ -128,14 +133,18 @@ object SealedSender {
         val expectedSMac = CryptoPrimitives.hmacSha256(sMacKey, sCiphertext)
         if (!expectedSMac.contentEquals(sMac)) error("sealed sender message MAC verification failed")
 
-        val innerJson = CryptoPrimitives.aesCtr(sCipherKey, CTR_IV, sCiphertext).decodeToString()
+        val innerJson = sCiphertext.copyOfRange(0, 16).let { iv ->
+            CryptoPrimitives.aesCtr(sCipherKey, iv, sCiphertext.copyOfRange(16, sCiphertext.size))
+        }.decodeToString() // FIXED: Random IV in SealedSender
         val inner = json.decodeFromString(InnerWire.serializer(), innerJson)
+        val headerBytes = Base64.decode(inner.header)
 
         return OpenedEnvelope(
             senderId = inner.sender_id,
             ciphertext = Base64.decode(inner.ciphertext),
-            headerJson = Base64.decode(inner.header).decodeToString(),
-            senderIkPublic = senderIkPublic
+            headerJson = headerBytes.decodeToString(),
+            senderIkPublic = senderIkPublic,
+            headerBytes = headerBytes
         )
     }
 }

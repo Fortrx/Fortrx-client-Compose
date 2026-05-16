@@ -30,7 +30,9 @@ android {
             matchingFallbacks += listOf("debug")
         }
         getByName("release") {
-            isMinifyEnabled = false
+            isMinifyEnabled = true // FIXED: Enable R8 Minification
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
     compileOptions {
