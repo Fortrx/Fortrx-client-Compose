@@ -27,11 +27,4 @@ Package native installers:
 ```
 ./gradlew :androidApp:assembleDebug
 ```
-
-## iOS
-
-Open `iosApp/iosApp.xcodeproj` after running `./gradlew :shared:linkDebugFrameworkIosArm64`.
-
-## Server-side changes
-
-See `SERVER_CHANGES.md`.
+<img width="1174" height="426" alt="image" src="https://github.com/user-attachments/assets/84be1a3b-0ac0-4050-b050-37269f7fc7c2" />
